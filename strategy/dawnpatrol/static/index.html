@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dawnpatrol</title>
+<link rel="stylesheet" href="/_shared/base.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span> Dawnpatrol</div>
+    <span class="sub" id="subtitle">What happened, ranked for your clients</span>
+    <div class="spacer"></div>
+    <button id="btnCollect" class="btn primary">Collect now</button>
+    <button id="btnCopy" class="btn" title="Copy the whole report as markdown">Copy</button>
+    <span id="themeSlot"></span>
+  </header>
+
+  <div class="body">
+    <main class="main">
+      <div class="scroll">
+
+        <div id="staleness" class="note hidden"></div>
+
+        <section class="section" id="briefingSection" hidden>
+          <div class="section-head">
+            <h1>The briefing</h1>
+            <span class="muted small">written from the list below</span>
+          </div>
+          <div class="card briefing" id="briefing"></div>
+        </section>
+
+        <section class="section">
+          <div class="section-head">
+            <h1>Today</h1>
+            <span class="muted small" id="reportMeta"></span>
+          </div>
+
+          <div id="stories" class="stories"></div>
+
+          <div id="storiesEmpty" class="empty hidden">
+            <div class="big">◎</div>
+            <h2>Nothing collected yet</h2>
+            <p>Press <strong>Collect now</strong>. It reads 26 sources at once and
+               takes about twenty seconds. After that a scheduled task does it at
+               6am and this screen is just where you read it.</p>
+          </div>
+        </section>
+
+        <section class="section" id="keptSection" hidden>
+          <div class="section-head">
+            <h1>Worth mentioning</h1>
+            <span class="muted small" id="keptCount"></span>
+          </div>
+          <div id="kept" class="rows"></div>
+        </section>
+
+        <section class="section" id="healthSection" hidden>
+          <div class="section-head">
+            <h1>What did not answer</h1>
+            <span class="muted small">listed, not skipped</span>
+          </div>
+          <div class="card tight">
+            <p class="small muted nudge">A feed that quietly stopped working looks
+              exactly like a quiet week. That is why these are on the screen rather
+              than in a log.</p>
+            <div id="health" class="rows"></div>
+          </div>
+        </section>
+
+        <section class="section" id="historySection" hidden>
+          <div class="section-head">
+            <h1>Earlier</h1>
+            <span class="muted small">the last two months</span>
+          </div>
+          <div id="history" class="history"></div>
+        </section>
+
+        <footer class="foot">
+          <span class="mono small muted" id="footNote">Local only. The screen never needs the network — only the collector does</span>
+        </footer>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="/_shared/ui.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

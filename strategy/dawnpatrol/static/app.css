@@ -1,0 +1,105 @@
+/* app.css — Dawnpatrol.
+
+   Every colour is a design-system variable. The accent is not declared here:
+   it arrives from the function palette at the bottom of base.css, because this
+   app sits in `strategy/` and the folder decides. */
+
+.stories { display: flex; flex-direction: column; gap: 10px; }
+
+.story {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg-2);
+  padding: 12px 14px;
+  position: relative;
+}
+.story:hover { border-color: var(--accent-line); }
+
+/* The top three earn a left edge. Below that, rank is the ordering and does
+   not need decorating as well. */
+.story.is-top { border-left: 3px solid var(--accent); }
+
+.story-head { display: flex; align-items: baseline; gap: 8px; }
+.story-rank {
+  font: 600 12px/1 var(--mono);
+  color: var(--text-3);
+  min-width: 22px;
+  padding-top: 3px;
+}
+.story-title { flex: 1; font-size: 15px; font-weight: 600; line-height: 1.35; }
+.story-title a { color: var(--text); text-decoration: none; }
+.story-title a:hover { color: var(--accent); text-decoration: underline; }
+
+.story-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 6px 0 0 30px;
+  font-size: 12px; color: var(--text-3);
+}
+.story-summary {
+  margin: 8px 0 0 30px;
+  font-size: 13px; color: var(--text-2); line-height: 1.5;
+}
+.story-why {
+  margin: 8px 0 0 30px;
+  font: 11px/1.5 var(--mono);
+  color: var(--text-3);
+}
+.story-also { margin: 6px 0 0 30px; font-size: 12px; }
+.story-also a { color: var(--text-2); }
+.story-also a:hover { color: var(--accent); }
+
+.story-actions {
+  margin: 9px 0 0 30px;
+  display: flex; gap: 6px;
+}
+
+.band {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--line);
+  color: var(--text-3);
+}
+.band.is-lab     { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.band.is-security{ background: var(--warn-soft);  color: var(--warn);  border-color: transparent; }
+.band.is-record  { background: var(--good-soft);  color: var(--good);  border-color: transparent; }
+
+.briefing { white-space: pre-wrap; line-height: 1.6; font-size: 14px; }
+.briefing strong { color: var(--text); }
+
+.nudge { margin-bottom: 8px; }
+
+.history { display: flex; flex-wrap: wrap; gap: 6px; }
+.history .hbtn {
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text-2);
+  border-radius: var(--r-sm);
+  padding: 5px 9px;
+  font: 12px var(--mono);
+  cursor: pointer;
+}
+.history .hbtn:hover { border-color: var(--accent-line); color: var(--text); }
+.history .hbtn.active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+.history .hbtn .warn-dot { color: var(--warn); }
+
+.rows .row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.rows .row:last-child { border-bottom: 0; }
+.rows .row .grow { flex: 1; min-width: 0; }
+.rows .row .rtitle { font-size: 13px; font-weight: 500; }
+.rows .row .rtitle a { color: var(--text); text-decoration: none; }
+.rows .row .rtitle a:hover { color: var(--accent); }
+.rows .row .rsub { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.rows .row .rnote {
+  font-size: 12px; color: var(--text-2); margin-top: 4px;
+  border-left: 2px solid var(--line); padding-left: 8px;
+}
+
+.dead { font-size: 12px; color: var(--text-3); margin-top: 8px; }
+
+.collecting { opacity: .55; pointer-events: none; }
