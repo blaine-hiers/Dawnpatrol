@@ -130,6 +130,27 @@ class TestDeduplication(unittest.TestCase):
         ], now_ms=NOW)
         self.assertEqual(report["stories"][0]["sourcesCount"], 1)
 
+    def test_merging_an_undated_story_with_a_dated_one_inherits_the_date(self):
+        """`dated` describes where `published` came from. When the merge pass
+        moves a real timestamp onto the survivor, the flag has to move with
+        it --- otherwise the survivor is left with a real date and a "no date
+        in the feed" why-line contradicting it (the bug this guards)."""
+        undated = feeds.Item(
+            "OpenAI announces enterprise pricing changes for small business customers",
+            "https://a.com/1", "One", "press", 0, dated=False)
+        dated = feeds.Item(
+            "OpenAI announces enterprise pricing changes for small business",
+            "https://b.com/2", "Two", "press", NOW - 3600_000, dated=True)
+        report = digest.build([result([undated], name="One"),
+                               result([dated], name="Two")], now_ms=NOW)
+
+        self.assertEqual(len(report["stories"]), 1)
+        story = report["stories"][0]
+        self.assertTrue(story["dated"])
+        self.assertEqual(story["published"], NOW - 3600_000)
+        self.assertIn("today", story["why"])
+        self.assertFalse(any("no date in the feed" in line for line in story["why"]))
+
 
 class TestWindow(unittest.TestCase):
     def test_items_older_than_the_window_are_dropped(self):
