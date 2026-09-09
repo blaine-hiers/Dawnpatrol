@@ -8,6 +8,7 @@ Hacker News to be up is a test that fails for reasons that are not bugs.
 import gzip
 import sys
 import unittest
+import zlib
 from pathlib import Path
 
 _TESTS = Path(__file__).resolve().parent
@@ -239,6 +240,65 @@ class TestSizeCeilings(unittest.TestCase):
         res = feeds.fetch_one({"name": "Fine", "band": "press",
                                 "url": "http://example.test/feed"})
         self.assertTrue(res.ok)
+
+    def test_a_body_that_is_not_actually_compressed_falls_back_to_the_raw_bytes(self):
+        """Content-Encoding can lie. A genuine decompression failure — as
+        opposed to a `_TooBig` — means "not actually compressed", not "this
+        fetch failed"; the raw bytes still get a chance to parse."""
+        self._serve(RSS2, {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "Mislabeled", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertTrue(res.ok)
+        self.assertEqual(len(res.items), 1)
+
+    def test_multi_member_gzip_decodes_every_member_through_fetch_one(self):
+        """A CDN can emit concatenated gzip members from streamed
+        compression. `gzip.decompress` reads all of them; a single
+        `zlib.decompressobj` reads only the first and leaves the rest in
+        `unused_data` — silently truncating a working feed is exactly the
+        "silently an empty feed" outcome this module must never produce."""
+        first_half = RSS2[:len(RSS2) // 2]
+        second_half = RSS2[len(RSS2) // 2:]
+        multi_member = gzip.compress(first_half) + gzip.compress(second_half)
+        # Sanity: the fixture really is multi-member, and gzip.decompress
+        # really does need both members to recover the original feed.
+        self.assertEqual(gzip.decompress(multi_member), RSS2)
+
+        self._serve(multi_member, {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "Streamed", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(len(res.items), 1)
+
+    def test_a_body_shorter_than_content_length_is_reported_not_silently_truncated(self):
+        """Passing a size to `read()` — which bounding the read requires —
+        turns a short body into a silent EOF instead of the `IncompleteRead`
+        that `read()` with no argument would raise. A dropped connection must
+        not be handed to `parse` as if it were merely a malformed feed."""
+        self._serve(b"short", {"Content-Length": "500"})
+        res = feeds.fetch_one({"name": "Cut", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertFalse(res.ok)
+        self.assertIn("closed early", res.error)
+        self.assertIn("500", res.error)
+
+
+class TestInflateCapped(unittest.TestCase):
+    """Direct coverage of `_inflate_capped`'s multi-member handling, separate
+    from the network path."""
+
+    def test_multi_member_gzip_matches_gzip_decompress(self):
+        first_half = RSS2[:len(RSS2) // 2]
+        second_half = RSS2[len(RSS2) // 2:]
+        multi_member = gzip.compress(first_half) + gzip.compress(second_half)
+        expected = gzip.decompress(multi_member)
+        got = feeds._inflate_capped(multi_member, zlib.MAX_WBITS | 16, 10**9)
+        self.assertEqual(got, expected)
+        self.assertEqual(got, RSS2)
+
+    def test_a_single_member_still_works(self):
+        got = feeds._inflate_capped(gzip.compress(RSS2), zlib.MAX_WBITS | 16, 10**9)
+        self.assertEqual(got, RSS2)
 
 
 class TestUserAgent(unittest.TestCase):

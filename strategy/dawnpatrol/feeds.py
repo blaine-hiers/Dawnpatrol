@@ -23,6 +23,7 @@ import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from http.client import IncompleteRead
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
@@ -280,6 +281,18 @@ class _TooBig(Exception):
         super().__init__(f"{what} exceeds the {limit} byte limit")
 
 
+class _ShortRead(Exception):
+    """The connection closed before the body finished arriving."""
+
+    def __init__(self, got: int, expected: int | None):
+        self.got = got
+        self.expected = expected
+        msg = (f"connection closed early — got {got} of {expected} declared bytes"
+               if expected is not None else
+               f"connection closed early — got {got} bytes then it stopped")
+        super().__init__(msg)
+
+
 _READ_CHUNK = 65536
 
 
@@ -289,39 +302,99 @@ def _read_capped(r, limit: int) -> bytes:
     Reads in fixed-size chunks and checks the running total after each one, so
     an oversized body is caught a chunk after it crosses the line rather than
     after the whole thing has already been pulled into memory to measure it.
+
+    A short body is a failure too, not a smaller success. `HTTPResponse.read()`
+    with no argument raises `IncompleteRead` when the connection closes before
+    `Content-Length` bytes have arrived; giving it a size instead — which
+    bounding the read requires — makes a short body come back as a silent EOF
+    (CPython's own http/client.py notes this trade-off). Comparing what
+    actually arrived against `Content-Length` gets that failure back, so a
+    dropped connection is reported as one instead of being handed to `parse`
+    as a feed that is merely malformed. Chunked responses carry no
+    `Content-Length` to compare against, but a broken chunked transfer can
+    still raise `IncompleteRead` directly out of `read()`, so that is caught
+    here too — otherwise it would escape `fetch_one` as a raised exception,
+    which is exactly what this module promises never happens.
     """
+    expected = None
+    content_length = r.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            expected = int(content_length)
+        except ValueError:
+            expected = None
+
     chunks: list[bytes] = []
     total = 0
     while True:
-        chunk = r.read(_READ_CHUNK)
+        try:
+            chunk = r.read(_READ_CHUNK)
+        except IncompleteRead as e:
+            total += len(e.partial or b"")
+            raise _ShortRead(total, expected if expected is not None else e.expected) from e
         if not chunk:
-            return b"".join(chunks)
+            break
         chunks.append(chunk)
         total += len(chunk)
         if total > limit:
             raise _TooBig("response body", limit)
 
+    if expected is not None and total < expected:
+        raise _ShortRead(total, expected)
+    return b"".join(chunks)
+
 
 def _inflate_capped(data: bytes, wbits: int, limit: int) -> bytes:
-    """Decompress with the same bounded-chunk discipline as `_read_capped`.
+    """Decompress with the same bounded-chunk discipline as `_read_capped`,
+    across every member of the stream, with `limit` enforced on their
+    combined output.
 
-    gzip/deflate can expand a compressed body by three orders of magnitude, so
-    decompressing it in one call and checking the result afterward means the
-    bomb has already gone off in memory by the time it is caught. Feeding the
-    decompressor `_READ_CHUNK` bytes of *output* at a time and checking the
-    running total after each call catches the overflow mid-expansion instead.
+    Two things a single, one-shot `zlib.decompressobj` call gets wrong:
+
+    * gzip is a container that can hold more than one concatenated member —
+      exactly what streamed or concatenated compression produces, which CDNs
+      do emit. `gzip.decompress()` decodes every member; a lone
+      `decompressobj` decodes only the first and silently leaves the rest in
+      `unused_data`. Stopping there truncates a working feed with no error —
+      the "silently an empty feed" outcome this module exists to prevent — so
+      whenever a decompressor reports `eof`, whatever is left (its own
+      `unused_data`, plus anything from `data` not yet handed to it) starts a
+      fresh decompressor instead of ending the read.
+    * Input is fed forward through `data` by advancing an index, and each
+      decompress call is both input- and output-bounded (`_READ_CHUNK` of
+      each). Re-assigning `unconsumed_tail` as the next "remaining" buffer —
+      the previous approach — feeds the same still-mostly-full tail back in
+      on every iteration; slicing it is quadratic in the number of output
+      chunks once the input is a lot smaller than the output, which is
+      exactly the shape of a compressible feed. Bounding the input side too
+      keeps `unconsumed_tail` itself small (at most one `_READ_CHUNK`), so
+      re-slicing it costs nothing.
     """
-    d = zlib.decompressobj(wbits)
     out = bytearray()
-    remaining = data
-    while remaining:
-        piece = d.decompress(remaining, _READ_CHUNK)
-        out.extend(piece)
+    pos, n = 0, len(data)
+    d = zlib.decompressobj(wbits)
+    pending = b""
+
+    while True:
+        if not pending:
+            if pos >= n:
+                break
+            pending = data[pos:pos + _READ_CHUNK]
+            pos += len(pending)
+
+        out.extend(d.decompress(pending, _READ_CHUNK))
         if len(out) > limit:
             raise _TooBig("decompressed body", limit)
-        remaining = d.unconsumed_tail
-        if not remaining and not piece:
-            break
+        pending = d.unconsumed_tail
+
+        if d.eof:
+            leftover = pending + d.unused_data + data[pos:]
+            pos, pending = n, b""
+            if not leftover:
+                break
+            d = zlib.decompressobj(wbits)
+            pending = leftover
+
     out.extend(d.flush())
     if len(out) > limit:
         raise _TooBig("decompressed body", limit)
@@ -379,6 +452,8 @@ def fetch_one(source: dict, timeout: float = 25.0) -> FetchResult:
         mb = e.limit // (1024 * 1024)
         return FetchResult(name, url, band, False,
                            error=f"{e.what} is bigger than the {mb} MB limit")
+    except _ShortRead as e:
+        return FetchResult(name, url, band, False, error=str(e))
     except (TimeoutError, OSError) as e:
         return FetchResult(name, url, band, False, error=f"{type(e).__name__}: {e}")
 
