@@ -9,7 +9,9 @@ machine running it.
 """
 
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,9 +22,10 @@ _APP = _ROOT / _TESTS.relative_to(_ROOT / "tests")
 sys.path.insert(0, str(_APP))
 sys.path.insert(0, str(_ROOT / "_shared"))
 
-import digest  # noqa: E402
-import feeds  # noqa: E402
-import synth  # noqa: E402
+import app as appmod    # noqa: E402
+import feeds            # noqa: E402
+import synth            # noqa: E402
+from store import Store  # noqa: E402
 
 
 class TestClaudePath(unittest.TestCase):
@@ -158,33 +161,55 @@ class TestPrompt(unittest.TestCase):
 
 
 class TestEndToEndGuarantee(unittest.TestCase):
-    """The README's promise, exercised directly: 'the report still ships,
-    unchanged, minus one section.' Build the same digest twice from the same
-    fixed input, run a failing synth over one copy, and check the digest
-    itself never moved.
+    """The README's promise, exercised at the level app.py actually makes it:
+    drive `app.collect()` itself --- the one function that writes a failed
+    synth's result into the report --- with feed fetching stubbed out and
+    `synth.summarise` made to fail, and check the digest itself is untouched.
+
+    A test that reimplements the report-assembly wiring inline instead of
+    calling `collect()` would pass even if `collect()` itself mishandled a
+    synth failure, so this goes through the real thing, following the same
+    pattern `test_api.py` uses to keep `app.py` off the real database and the
+    real network: swap `appmod.store` for a throwaway one, and stub the one
+    call that would otherwise reach the internet.
     """
 
-    NOW = 1_785_000_000_000
+    FIXED_NOW = 1_785_000_000.0    # seconds; a pinned clock so two separate
+                                    # collect() calls agree down to the
+                                    # "generated" timestamp and compare exactly
 
-    def _built(self):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="dawnpatrol-synth-test-"))
+        self._real_store = appmod.store
+        appmod.store = Store(self.tmp / "radar.db")
+        self.addCleanup(self._restore_store)
+
         items = [feeds.Item("Pricing changes for small shops",
                             "https://example.com/a", "Src", "press",
-                            self.NOW, "summary", True)]
-        return digest.build(
-            [feeds.FetchResult("Src", "u", "press", True, items=items)],
-            now_ms=self.NOW)
+                            int(self.FIXED_NOW * 1000), "summary", True)]
+        fixed_results = [feeds.FetchResult("Src", "u", "press", True, items=items)]
+        fetch_patcher = mock.patch.object(feeds, "fetch_all", return_value=fixed_results)
+        fetch_patcher.start()
+        self.addCleanup(fetch_patcher.stop)
+
+        clock_patcher = mock.patch("time.time", return_value=self.FIXED_NOW)
+        clock_patcher.start()
+        self.addCleanup(clock_patcher.stop)
+
+    def _restore_store(self):
+        appmod.store.close()
+        appmod.store = self._real_store
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_a_failing_synth_still_yields_a_complete_report_with_the_same_digest(self):
-        no_summary = self._built()
-        no_summary["summary"], no_summary["summaryError"] = "", ""
+        with mock.patch.object(synth, "summarise", return_value=("", "boom")):
+            with_failing_synth = appmod.collect(with_summary=True)
+        appmod.store.clear(appmod.REPORTS)
 
-        with_failing_synth = self._built()
-        with mock.patch.object(synth, "claude_path", return_value=""):
-            text, err = synth.summarise(with_failing_synth)
-        with_failing_synth["summary"], with_failing_synth["summaryError"] = text, err
+        no_summary = appmod.collect(with_summary=False)
 
-        self.assertEqual(text, "")
-        self.assertTrue(err, "a failure must say why, not just come back empty")
+        self.assertEqual(with_failing_synth["summary"], "")
+        self.assertEqual(with_failing_synth["summaryError"], "boom")
 
         def digest_only(report):
             return {k: v for k, v in report.items()
