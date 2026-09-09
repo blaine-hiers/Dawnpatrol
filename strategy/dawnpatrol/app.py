@@ -246,7 +246,7 @@ def _run_once(argv: list[str]) -> int:
         print(f"Dawnpatrol — {report['id']}")
         print(f"  {ok}/{tried} sources answered in {time.time() - started:.1f}s")
         print(f"  {counts.get('storiesAfterMerge', 0)} distinct stories, "
-              f"{counts.get('shown', 0)} kept")
+              f"all of them in the report")
         if report.get("summaryError"):
             print(f"  briefing: {report['summaryError']}")
         elif report.get("summary"):

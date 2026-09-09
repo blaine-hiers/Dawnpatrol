@@ -197,8 +197,22 @@ class TestRanking(unittest.TestCase):
         he is allowed to see is a tool he cannot trust for two years."""
         boring = [item(f"Ablation study number {i}", f"https://a.com/{i}")
                   for i in range(12)]
-        report = digest.build([result(boring)], now_ms=NOW, limit=40)
+        report = digest.build([result(boring)], now_ms=NOW)
         self.assertEqual(len(report["stories"]), 12)
+
+    def test_a_window_full_of_stories_is_not_truncated(self):
+        """The regression this issue fixes: `build()` used to slice `merged`
+        to 40 before it reached the payload, so anything ranked 41st or worse
+        was collected and then made unreachable. `counts` reported the
+        shortfall but the stories themselves were gone --- exactly the
+        auditable-absence problem the module docstring warns about."""
+        many = [item(f"Distinct headline {i}", f"https://a.com/{i}")
+                for i in range(75)]
+        report = digest.build([result(many)], now_ms=NOW)
+        self.assertEqual(len(report["stories"]), 75)
+        self.assertEqual(report["counts"]["storiesAfterMerge"], 75)
+        urls = {s["url"] for s in report["stories"]}
+        self.assertEqual(len(urls), 75, "every collected story must be reachable")
 
 
 class TestFailureReporting(unittest.TestCase):

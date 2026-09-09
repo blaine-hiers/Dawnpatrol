@@ -181,13 +181,19 @@ def score_of(story: Story, now_ms: int) -> tuple[float, list[str]]:
 
 # ---------------------------------------------------------------- building
 
-def build(results, now_ms: int | None = None, window_days: int = 3,
-          limit: int = 40) -> dict:
+def build(results, now_ms: int | None = None, window_days: int = 3) -> dict:
     """Collapse, score and order. `results` is a list of feeds.FetchResult.
 
     `window_days` keeps the archive feeds honest: OpenAI's RSS carries 1,105
     entries going back years, and without a window the "news" would be whatever
     happened to sort first.
+
+    There used to be a `limit` here that sliced `merged` before it reached the
+    payload. That is exactly the auditable-absence problem this module's own
+    docstring warns about, one step removed: the count of what was cut is
+    visible, the stories themselves are not. So every story that survives the
+    window ships in the payload, in ranked order, and it is the UI's job —
+    not this function's — to decide how much of that list to paint at once.
     """
     now_ms = now_ms or int(time.time() * 1000)
     cutoff = now_ms - (window_days * DAY_MS)
@@ -254,7 +260,7 @@ def build(results, now_ms: int | None = None, window_days: int = 3,
     return {
         "generated": now_ms,
         "windowDays": window_days,
-        "stories": [s.to_json() for s in merged[:limit]],
+        "stories": [s.to_json() for s in merged],
         "counts": {
             "sourcesTried": len(results),
             "sourcesOk": sum(1 for r in results if r.ok),
@@ -263,7 +269,6 @@ def build(results, now_ms: int | None = None, window_days: int = 3,
             "itemsSeen": considered,
             "outsideWindow": too_old,
             "storiesAfterMerge": len(merged),
-            "shown": min(limit, len(merged)),
         },
         "failed": failed,
         "quiet": quiet,
