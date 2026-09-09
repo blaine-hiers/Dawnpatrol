@@ -246,7 +246,12 @@ def build(results, now_ms: int | None = None, window_days: int = 3) -> dict:
                     all(a["source"] != story.source for a in hit.also):
                 hit.also.append({"source": story.source, "url": story.url})
             if story.published > hit.published:
+                # `dated` describes where `published` came from, not the story
+                # in the abstract --- move it with the timestamp it belongs to,
+                # or the survivor ends up with a real date and the "no date in
+                # the feed" line stamped underneath it.
                 hit.published = story.published
+                hit.dated = story.dated
         else:
             merged.append(story)
 
