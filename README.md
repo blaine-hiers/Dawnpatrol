@@ -7,7 +7,7 @@ ranked for the kind of company you actually advise — not for AI in general.
 py strategy/dawnpatrol/app.py     # opens in your browser
 py strategy/dawnpatrol/app.py --once    # headless, for a 6am scheduled run
 py strategy/dawnpatrol/app.py --check   # are the feeds still alive?
-py run_all_tests.py               # 67 tests
+py run_all_tests.py               # 68 tests
 ```
 
 Windows: double-click `run.cmd`.
@@ -67,7 +67,7 @@ for a 6am collection. The task runs `--once`, which writes a report and exits.
 ```
 _shared/               server, storage and design system (vendored — see below)
 strategy/dawnpatrol/   the app
-tests/                 67 tests, mirroring the app tree
+tests/                 68 tests, mirroring the app tree
 ```
 
 `_shared/` is vendored from a larger private workspace of about twenty of these

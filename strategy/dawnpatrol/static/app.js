@@ -16,6 +16,16 @@
   var shown = null;        // the report currently on screen
   var collecting = false;
 
+  /* digest.build() no longer truncates --- every story it collected inside the
+     window ships in the payload (see digest.py). A day with 27 sources can
+     easily return several hundred, and painting all of them at once would
+     make the screen the new bottleneck instead of the network. So the DOM
+     only ever holds `storiesVisible` cards; "Show N more" grows that number
+     rather than the server shrinking the list. */
+  var STORIES_STEP = 40;
+  var storiesVisible = STORIES_STEP;
+  var storiesVisibleFor = null;   // which report id storiesVisible applies to
+
   // ------------------------------------------------------------- helpers
 
   function bandLabel(key) {
@@ -116,7 +126,30 @@
     UI.clear(host);
     var stories = (shown && shown.stories) || [];
     $("#storiesEmpty").classList.toggle("hidden", stories.length > 0);
-    stories.forEach(function (s, i) { host.appendChild(storyCard(s, i)); });
+
+    // Switching to a different report starts the count over. Re-rendering
+    // the same one (a kept-button click, a refresh) must not collapse a list
+    // the reader already expanded.
+    var reportId = shown && shown.id;
+    if (reportId !== storiesVisibleFor) {
+      storiesVisible = STORIES_STEP;
+      storiesVisibleFor = reportId;
+    }
+
+    var visible = stories.slice(0, storiesVisible);
+    visible.forEach(function (s, i) { host.appendChild(storyCard(s, i)); });
+
+    var remaining = stories.length - visible.length;
+    if (remaining > 0) {
+      var more = el("button", {
+        class: "btn block", text: "Show " + remaining + " more"
+      }, []);
+      more.addEventListener("click", function () {
+        storiesVisible += STORIES_STEP;
+        renderStories();
+      });
+      host.appendChild(more);
+    }
 
     var meta = $("#reportMeta");
     if (!shown) { meta.textContent = ""; return; }
