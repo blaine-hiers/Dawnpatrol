@@ -5,8 +5,10 @@ worth testing is what happens to a feed's *contents*, and a test that needs
 Hacker News to be up is a test that fails for reasons that are not bugs.
 """
 
+import gzip
 import sys
 import unittest
+import zlib
 from pathlib import Path
 
 _TESTS = Path(__file__).resolve().parent
@@ -152,6 +154,151 @@ class TestFetchResult(unittest.TestCase):
 
     def test_fetch_all_of_nothing_is_empty_not_an_error(self):
         self.assertEqual(feeds.fetch_all([]), [])
+
+
+class _FakeHeaders:
+    def __init__(self, d: dict | None = None):
+        self._d = d or {}
+
+    def get(self, key, default=None):
+        return self._d.get(key, default)
+
+
+class _FakeResponse:
+    """Just enough of an `http.client.HTTPResponse` for `fetch_one` to use:
+    a chunked `.read(n)`, headers, and a no-op context manager."""
+
+    def __init__(self, data: bytes, headers: dict | None = None):
+        self._data = data
+        self._pos = 0
+        self.headers = _FakeHeaders(headers)
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            chunk, self._pos = self._data[self._pos:], len(self._data)
+            return chunk
+        chunk = self._data[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestSizeCeilings(unittest.TestCase):
+    """A source that returns too much, or that inflates into too much, comes
+    back as `FetchResult(ok=False)` — never a raised exception and never a
+    silent empty feed."""
+
+    def setUp(self):
+        self._orig_urlopen = feeds.urlopen
+        self._orig_max_response = feeds.MAX_RESPONSE_BYTES
+        self._orig_max_decompressed = feeds.MAX_DECOMPRESSED_BYTES
+
+    def tearDown(self):
+        feeds.urlopen = self._orig_urlopen
+        feeds.MAX_RESPONSE_BYTES = self._orig_max_response
+        feeds.MAX_DECOMPRESSED_BYTES = self._orig_max_decompressed
+
+    def _serve(self, data: bytes, headers: dict | None = None):
+        feeds.urlopen = lambda req, timeout=None: _FakeResponse(data, headers)
+
+    def test_oversize_body_is_reported_not_read_in_full(self):
+        feeds.MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+        self._serve(b"x" * (3 * 1024 * 1024))
+        res = feeds.fetch_one({"name": "Big", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertFalse(res.ok)
+        self.assertEqual(res.items, [])
+        self.assertIn("response body", res.error)
+        self.assertIn("2 MB", res.error)
+
+    def test_small_compressed_body_that_decompresses_oversize_is_reported(self):
+        # Five megabytes of one repeated byte compresses to almost nothing,
+        # which is exactly the shape of a decompression bomb: it sails past
+        # the compressed-side ceiling with room to spare.
+        plain = b"a" * (5 * 1024 * 1024)
+        compressed = gzip.compress(plain)
+        self.assertLess(len(compressed), 1024 * 1024,
+                        "fixture should be small compressed to be a real test")
+
+        feeds.MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+        feeds.MAX_DECOMPRESSED_BYTES = 2 * 1024 * 1024
+        self._serve(compressed, {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "Bomb", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertFalse(res.ok)
+        self.assertIn("decompressed body", res.error)
+        self.assertIn("2 MB", res.error)
+
+    def test_a_body_within_both_limits_still_works(self):
+        plain = b'{"version": "https://jsonfeed.org/version/1.1", "items": []}'
+        self._serve(gzip.compress(plain), {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "Fine", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertTrue(res.ok)
+
+    def test_a_body_that_is_not_actually_compressed_falls_back_to_the_raw_bytes(self):
+        """Content-Encoding can lie. A genuine decompression failure — as
+        opposed to a `_TooBig` — means "not actually compressed", not "this
+        fetch failed"; the raw bytes still get a chance to parse."""
+        self._serve(RSS2, {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "Mislabeled", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertTrue(res.ok)
+        self.assertEqual(len(res.items), 1)
+
+    def test_multi_member_gzip_decodes_every_member_through_fetch_one(self):
+        """A CDN can emit concatenated gzip members from streamed
+        compression. `gzip.decompress` reads all of them; a single
+        `zlib.decompressobj` reads only the first and leaves the rest in
+        `unused_data` — silently truncating a working feed is exactly the
+        "silently an empty feed" outcome this module must never produce."""
+        first_half = RSS2[:len(RSS2) // 2]
+        second_half = RSS2[len(RSS2) // 2:]
+        multi_member = gzip.compress(first_half) + gzip.compress(second_half)
+        # Sanity: the fixture really is multi-member, and gzip.decompress
+        # really does need both members to recover the original feed.
+        self.assertEqual(gzip.decompress(multi_member), RSS2)
+
+        self._serve(multi_member, {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "Streamed", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(len(res.items), 1)
+
+    def test_a_body_shorter_than_content_length_is_reported_not_silently_truncated(self):
+        """Passing a size to `read()` — which bounding the read requires —
+        turns a short body into a silent EOF instead of the `IncompleteRead`
+        that `read()` with no argument would raise. A dropped connection must
+        not be handed to `parse` as if it were merely a malformed feed."""
+        self._serve(b"short", {"Content-Length": "500"})
+        res = feeds.fetch_one({"name": "Cut", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertFalse(res.ok)
+        self.assertIn("closed early", res.error)
+        self.assertIn("500", res.error)
+
+
+class TestInflateCapped(unittest.TestCase):
+    """Direct coverage of `_inflate_capped`'s multi-member handling, separate
+    from the network path."""
+
+    def test_multi_member_gzip_matches_gzip_decompress(self):
+        first_half = RSS2[:len(RSS2) // 2]
+        second_half = RSS2[len(RSS2) // 2:]
+        multi_member = gzip.compress(first_half) + gzip.compress(second_half)
+        expected = gzip.decompress(multi_member)
+        got = feeds._inflate_capped(multi_member, zlib.MAX_WBITS | 16, 10**9)
+        self.assertEqual(got, expected)
+        self.assertEqual(got, RSS2)
+
+    def test_a_single_member_still_works(self):
+        got = feeds._inflate_capped(gzip.compress(RSS2), zlib.MAX_WBITS | 16, 10**9)
+        self.assertEqual(got, RSS2)
 
 
 class TestUserAgent(unittest.TestCase):
