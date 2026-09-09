@@ -17,7 +17,6 @@ morning. Every fetch here comes back with a reason attached.
 from __future__ import annotations
 
 import concurrent.futures as futures
-import gzip
 import json
 import re
 import zlib
@@ -28,7 +27,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 
-__all__ = ["Item", "FetchResult", "fetch_all", "fetch_one", "parse", "USER_AGENT"]
+__all__ = ["Item", "FetchResult", "fetch_all", "fetch_one", "parse", "USER_AGENT",
+           "MAX_RESPONSE_BYTES", "MAX_DECOMPRESSED_BYTES"]
 
 # Identifies itself honestly as a bot with a contact, which is the convention
 # publishers actually want. Not an accident and not cosmetic: CISA's firewall
@@ -43,6 +43,19 @@ __all__ = ["Item", "FetchResult", "fetch_all", "fetch_one", "parse", "USER_AGENT
 # outside internal records. `localhost` is also simply true: this is a local
 # install with no public address.
 USER_AGENT = "Dawnpatrol/1.0 (+http://localhost)"
+
+# ---------------------------------------------------------------- limits
+
+# A feed is normally KBs to a few MB. Twenty megabytes over the wire already
+# means the source is broken — a CDN error page, a misconfigured server, a
+# domain that changed hands — not that this is an unusually large feed.
+MAX_RESPONSE_BYTES = 20 * 1024 * 1024
+# gzip/deflate can expand a small compressed body by three orders of
+# magnitude, so the compressed-side cap above does not bound what comes out
+# the other end. Checked incrementally during decompression (see
+# `_inflate_capped`) so a bomb is caught while it is still inflating, not
+# after it is already sitting in memory at full size.
+MAX_DECOMPRESSED_BYTES = 100 * 1024 * 1024
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 RSS1 = "{http://purl.org/rss/1.0/}"
@@ -258,18 +271,84 @@ def parse(raw: bytes, name: str, band: str) -> tuple[list[Item], str]:
 
 # ---------------------------------------------------------------- fetching
 
+class _TooBig(Exception):
+    """A response is bigger than we will hold in memory to find out how big."""
+
+    def __init__(self, what: str, limit: int):
+        self.what = what
+        self.limit = limit
+        super().__init__(f"{what} exceeds the {limit} byte limit")
+
+
+_READ_CHUNK = 65536
+
+
+def _read_capped(r, limit: int) -> bytes:
+    """Read a response body, refusing to read past `limit` bytes.
+
+    Reads in fixed-size chunks and checks the running total after each one, so
+    an oversized body is caught a chunk after it crosses the line rather than
+    after the whole thing has already been pulled into memory to measure it.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = r.read(_READ_CHUNK)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise _TooBig("response body", limit)
+
+
+def _inflate_capped(data: bytes, wbits: int, limit: int) -> bytes:
+    """Decompress with the same bounded-chunk discipline as `_read_capped`.
+
+    gzip/deflate can expand a compressed body by three orders of magnitude, so
+    decompressing it in one call and checking the result afterward means the
+    bomb has already gone off in memory by the time it is caught. Feeding the
+    decompressor `_READ_CHUNK` bytes of *output* at a time and checking the
+    running total after each call catches the overflow mid-expansion instead.
+    """
+    d = zlib.decompressobj(wbits)
+    out = bytearray()
+    remaining = data
+    while remaining:
+        piece = d.decompress(remaining, _READ_CHUNK)
+        out.extend(piece)
+        if len(out) > limit:
+            raise _TooBig("decompressed body", limit)
+        remaining = d.unconsumed_tail
+        if not remaining and not piece:
+            break
+    out.extend(d.flush())
+    if len(out) > limit:
+        raise _TooBig("decompressed body", limit)
+    return bytes(out)
+
+
 def _decompress(raw: bytes, encoding: str) -> bytes:
+    """Undo Content-Encoding. A `_TooBig` here means genuinely too big; any
+    other decompression failure is treated as "not actually compressed" and
+    the bytes are returned as-is, same as before this file capped anything."""
     if encoding == "gzip":
         try:
-            return gzip.decompress(raw)
+            return _inflate_capped(raw, zlib.MAX_WBITS | 16, MAX_DECOMPRESSED_BYTES)
+        except _TooBig:
+            raise
         except (OSError, zlib.error):
             return raw
     if encoding == "deflate":
         try:
-            return zlib.decompress(raw)
+            return _inflate_capped(raw, zlib.MAX_WBITS, MAX_DECOMPRESSED_BYTES)
+        except _TooBig:
+            raise
         except zlib.error:
             try:
-                return zlib.decompress(raw, -zlib.MAX_WBITS)
+                return _inflate_capped(raw, -zlib.MAX_WBITS, MAX_DECOMPRESSED_BYTES)
+            except _TooBig:
+                raise
             except zlib.error:
                 return raw
     return raw
@@ -288,13 +367,18 @@ def fetch_one(source: dict, timeout: float = 25.0) -> FetchResult:
     })
     try:
         with urlopen(req, timeout=timeout) as r:
-            raw = _decompress(r.read(), (r.headers.get("Content-Encoding") or "").lower())
+            body = _read_capped(r, MAX_RESPONSE_BYTES)
+            raw = _decompress(body, (r.headers.get("Content-Encoding") or "").lower())
     except HTTPError as e:
         return FetchResult(name, url, band, False,
                            error=f"HTTP {e.code} — the feed may have moved")
     except URLError as e:
         return FetchResult(name, url, band, False,
                            error=f"could not reach it ({e.reason})")
+    except _TooBig as e:
+        mb = e.limit // (1024 * 1024)
+        return FetchResult(name, url, band, False,
+                           error=f"{e.what} is bigger than the {mb} MB limit")
     except (TimeoutError, OSError) as e:
         return FetchResult(name, url, band, False, error=f"{type(e).__name__}: {e}")
 

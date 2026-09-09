@@ -5,6 +5,7 @@ worth testing is what happens to a feed's *contents*, and a test that needs
 Hacker News to be up is a test that fails for reasons that are not bugs.
 """
 
+import gzip
 import sys
 import unittest
 from pathlib import Path
@@ -152,6 +153,92 @@ class TestFetchResult(unittest.TestCase):
 
     def test_fetch_all_of_nothing_is_empty_not_an_error(self):
         self.assertEqual(feeds.fetch_all([]), [])
+
+
+class _FakeHeaders:
+    def __init__(self, d: dict | None = None):
+        self._d = d or {}
+
+    def get(self, key, default=None):
+        return self._d.get(key, default)
+
+
+class _FakeResponse:
+    """Just enough of an `http.client.HTTPResponse` for `fetch_one` to use:
+    a chunked `.read(n)`, headers, and a no-op context manager."""
+
+    def __init__(self, data: bytes, headers: dict | None = None):
+        self._data = data
+        self._pos = 0
+        self.headers = _FakeHeaders(headers)
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            chunk, self._pos = self._data[self._pos:], len(self._data)
+            return chunk
+        chunk = self._data[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestSizeCeilings(unittest.TestCase):
+    """A source that returns too much, or that inflates into too much, comes
+    back as `FetchResult(ok=False)` — never a raised exception and never a
+    silent empty feed."""
+
+    def setUp(self):
+        self._orig_urlopen = feeds.urlopen
+        self._orig_max_response = feeds.MAX_RESPONSE_BYTES
+        self._orig_max_decompressed = feeds.MAX_DECOMPRESSED_BYTES
+
+    def tearDown(self):
+        feeds.urlopen = self._orig_urlopen
+        feeds.MAX_RESPONSE_BYTES = self._orig_max_response
+        feeds.MAX_DECOMPRESSED_BYTES = self._orig_max_decompressed
+
+    def _serve(self, data: bytes, headers: dict | None = None):
+        feeds.urlopen = lambda req, timeout=None: _FakeResponse(data, headers)
+
+    def test_oversize_body_is_reported_not_read_in_full(self):
+        feeds.MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+        self._serve(b"x" * (3 * 1024 * 1024))
+        res = feeds.fetch_one({"name": "Big", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertFalse(res.ok)
+        self.assertEqual(res.items, [])
+        self.assertIn("response body", res.error)
+        self.assertIn("2 MB", res.error)
+
+    def test_small_compressed_body_that_decompresses_oversize_is_reported(self):
+        # Five megabytes of one repeated byte compresses to almost nothing,
+        # which is exactly the shape of a decompression bomb: it sails past
+        # the compressed-side ceiling with room to spare.
+        plain = b"a" * (5 * 1024 * 1024)
+        compressed = gzip.compress(plain)
+        self.assertLess(len(compressed), 1024 * 1024,
+                        "fixture should be small compressed to be a real test")
+
+        feeds.MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+        feeds.MAX_DECOMPRESSED_BYTES = 2 * 1024 * 1024
+        self._serve(compressed, {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "Bomb", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertFalse(res.ok)
+        self.assertIn("decompressed body", res.error)
+        self.assertIn("2 MB", res.error)
+
+    def test_a_body_within_both_limits_still_works(self):
+        plain = b'{"version": "https://jsonfeed.org/version/1.1", "items": []}'
+        self._serve(gzip.compress(plain), {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "Fine", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertTrue(res.ok)
 
 
 class TestUserAgent(unittest.TestCase):
