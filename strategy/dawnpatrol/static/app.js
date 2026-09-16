@@ -154,9 +154,10 @@
     var meta = $("#reportMeta");
     if (!shown) { meta.textContent = ""; return; }
     var c = shown.counts || {};
+    var w = shown.windowDays || 3;
     meta.textContent = shown.id + " · " + c.sourcesOk + "/" + c.sourcesTried +
       " sources answered · " + c.itemsSeen + " items seen · " +
-      c.storiesAfterMerge + " distinct";
+      c.storiesAfterMerge + " distinct · " + w + " days";
   }
 
   function renderBriefing() {
@@ -301,7 +302,13 @@
   function open(id) {
     if (shown && shown.id === id) return;
     guard(api("GET", "/api/report/" + encodeURIComponent(id)), "Open")
-      .then(function (doc) { shown = doc; renderAll(); });
+      .then(function (doc) {
+        shown = doc;
+        // Update the window days control to reflect the report's windowDays
+        var w = shown.windowDays || 3;
+        $("#windowDaysControl").value = w;
+        renderAll();
+      });
   }
 
   function collect() {
@@ -311,7 +318,8 @@
     btn.textContent = "Collecting…";
     document.body.classList.add("collecting");
 
-    api("POST", "/api/collect", {})
+    var windowDays = parseInt($("#windowDaysControl").value) || 3;
+    api("POST", "/api/collect", { windowDays: windowDays })
       .then(function (data) {
         shown = data.report;
         return refresh();
