@@ -33,12 +33,12 @@ BASE = None
 SERVER = None
 
 
-def fake_report(day="2026-08-01", titles=("A story",)):
+def fake_report(day="2026-08-01", titles=("A story",), window_days=3):
     items = [feeds.Item(t, f"https://example.com/{i}", "Src", "press",
                         1_785_000_000_000, "summary", True)
              for i, t in enumerate(titles)]
     report = digest.build([feeds.FetchResult("Src", "u", "press", True, items=items)],
-                          now_ms=1_785_000_000_000)
+                          window_days=window_days, now_ms=1_785_000_000_000)
     report["id"] = day
     report["summary"] = ""
     report["summaryError"] = ""
@@ -47,9 +47,9 @@ def fake_report(day="2026-08-01", titles=("A story",)):
 
 def setUpModule():
     global BASE, SERVER
-    # Never let a test reach the internet.
+    # Never let a test reach the internet. Capture window_days so it reaches the report.
     appmod.collect = lambda window_days=3, with_summary=True: (
-        appmod.store.save(appmod.REPORTS, fake_report()))
+        appmod.store.save(appmod.REPORTS, fake_report(window_days=window_days)))
     SERVER, BASE = appmod.app.serve_background()
 
 
@@ -110,6 +110,13 @@ class TestCollect(unittest.TestCase):
         status, data = call("POST", "/api/collect", {"windowDays": 400})
         self.assertEqual(status, 400)
         self.assertIn("between 1 and 14", data["error"])
+
+    def test_a_non_default_window_reaches_collect_and_is_stored(self):
+        appmod.store.clear(appmod.REPORTS)
+        status, data = call("POST", "/api/collect", {"windowDays": 7})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["report"]["windowDays"], 7,
+                         "the chosen window must reach collect() and be stored in the report")
 
 
 class TestReports(unittest.TestCase):
