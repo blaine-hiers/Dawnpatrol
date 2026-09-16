@@ -261,6 +261,16 @@ def build(results, now_ms: int | None = None, window_days: int = 3) -> dict:
 
     failed = [r.to_json() for r in results if not r.ok]
     quiet = [r.to_json() for r in results if r.ok and not r.items]
+    # Every result lands in exactly one of these three buckets. `ok` used to
+    # be implicit --- "not in `failed` or `quiet`" --- which was fine for
+    # *this* report but silently wrong for anything reading several reports
+    # side by side: a source that plain wasn't fetched that day (it did not
+    # exist in `sources.py` yet) is also "not in `failed` or `quiet`", and
+    # collapsing that into "ok" fabricates a day the source never ran on. So
+    # `ok` is stored explicitly, the same shape as its siblings, and a name
+    # missing from all three lists in a stored report is a fact on its own
+    # (see app.py's `_source_status`), not a fourth flavour of "ok".
+    ok_sources = [r.to_json() for r in results if r.ok and r.items]
 
     return {
         "generated": now_ms,
@@ -277,6 +287,7 @@ def build(results, now_ms: int | None = None, window_days: int = 3) -> dict:
         },
         "failed": failed,
         "quiet": quiet,
+        "ok": ok_sources,
     }
 
 

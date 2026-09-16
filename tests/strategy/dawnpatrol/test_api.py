@@ -89,6 +89,224 @@ class TestState(unittest.TestCase):
         self.assertTrue(any("Anthropic" in d["name"] for d in data["deadFeeds"]),
                         "the dead feeds are shown, not quietly pruned")
 
+    def test_state_carries_a_health_row_for_every_source(self):
+        status, data = call("GET", "/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["health"]), data["sourceCount"])
+        self.assertEqual(data["healthStreakDays"], appmod.HEALTH_STREAK_DAYS)
+
+
+def old_rpt(report_id, failed=(), quiet=()):
+    """A report in the format stored before per-source `ok` records existed.
+
+    The distinguishing fact is the *absence* of the `ok` key entirely --- not
+    an empty one. An install upgrading into source health carries up to
+    `KEEP_REPORTS` of these, and they cannot say whether a source that is in
+    neither list answered that morning or did not exist yet.
+    """
+    return {
+        "id": report_id,
+        "failed": [{"name": n, "error": e} for n, e in failed],
+        "quiet": [{"name": n} for n in quiet],
+    }
+
+
+def rpt(report_id, failed=(), quiet=(), ok=()):
+    """A minimal stored report --- just the fields source_health() reads.
+
+    `failed`/`quiet`/`ok` are `(name, error)` / `name` / `name` pairs. A name
+    that appears in none of the three is deliberately *not* the same as
+    `ok=[name]` --- that is exactly the "absent" case (the source was not
+    part of that day's fetch at all), which real reports since digest.py's
+    fix distinguish explicitly rather than leaving as an implicit default.
+    """
+    return {
+        "id": report_id,
+        "failed": [{"name": n, "error": e} for n, e in failed],
+        "quiet": [{"name": n} for n in quiet],
+        "ok": [{"name": n} for n in ok],
+    }
+
+
+class TestSourceHealth(unittest.TestCase):
+    """The rollup: computed from stored reports, not from today's fetch alone.
+
+    Failing and quiet streaks must never blur together --- feeds.py's own
+    docstring is explicit that a 429 and an empty Saturday are different
+    facts, and this rollup exists specifically not to flatten that.
+    """
+
+    def test_a_long_healthy_source_is_never_called_never_answered(self):
+        """The inverse of the absent bug, and just as false on screen.
+
+        Reports stored before the `ok` bucket existed cannot say whether a
+        source answered. Reading them as "absent" would erase every morning
+        it did answer and let the screen say "never answered with an item"
+        about a feed that answered daily until three days ago.
+        """
+        reports = ([old_rpt(f"2026-07-{d:02d}") for d in range(1, 29)] +
+                   [rpt("2026-09-13", failed=[("Steady", "HTTP 429")]),
+                    rpt("2026-09-14", failed=[("Steady", "HTTP 429")]),
+                    rpt("2026-09-15", failed=[("Steady", "HTTP 429")])])
+        [row] = appmod.source_health(reports, ["Steady"])
+
+        self.assertEqual(row["failingStreak"], 3)
+        self.assertTrue(row["flaggedFailing"])
+        # The claim the UI must not be allowed to make.
+        self.assertTrue(row["historyIncomplete"],
+                        "old-format reports must be reported as unreadable, "
+                        "not silently treated as evidence of anything")
+        self.assertEqual(row["unclassifiedReports"], 28)
+        # Only the three readable reports count toward the denominator.
+        self.assertEqual(row["sampleSize"], 3)
+
+    def test_an_unreadable_report_ends_a_streak_rather_than_extending_it(self):
+        """Walking newest-first: failed, failed, <unreadable>, failed.
+
+        The unreadable day is not evidence the source failed, so the streak
+        stops at 2. Extending it to 4 would cry wolf about a morning nothing
+        on disk describes.
+        """
+        reports = [rpt("2026-09-15", failed=[("Drifty", "HTTP 404")]),
+                   rpt("2026-09-14", failed=[("Drifty", "HTTP 404")]),
+                   old_rpt("2026-09-13"),
+                   rpt("2026-09-12", failed=[("Drifty", "HTTP 404")])]
+        [row] = appmod.source_health(reports, ["Drifty"])
+
+        self.assertEqual(row["failingStreak"], 2)
+        self.assertTrue(row["historyIncomplete"])
+
+    def test_a_fully_readable_history_is_not_marked_incomplete(self):
+        """historyIncomplete must stay off once old reports have aged out."""
+        reports = [rpt("2026-09-15", ok=["Good"]),
+                   rpt("2026-09-14", ok=["Good"])]
+        [row] = appmod.source_health(reports, ["Good"])
+
+        self.assertFalse(row["historyIncomplete"])
+        self.assertEqual(row["unclassifiedReports"], 0)
+        self.assertEqual(row["lastItemDate"], "2026-09-15")
+
+    def test_an_unreadable_report_never_fabricates_a_last_item_date(self):
+        """It cannot confirm an answer, so it must not date one."""
+        reports = [old_rpt("2026-09-15"), old_rpt("2026-09-14")]
+        [row] = appmod.source_health(reports, ["Mystery"])
+
+        self.assertIsNone(row["lastItemDate"])
+        self.assertEqual(row["sampleSize"], 0)
+        self.assertTrue(row["historyIncomplete"])
+
+    def test_a_clean_source_has_no_streaks(self):
+        reports = [rpt("2026-09-13", ok=["Good"]),
+                   rpt("2026-09-14", ok=["Good"]),
+                   rpt("2026-09-15", ok=["Good"])]
+        [row] = appmod.source_health(reports, ["Good"])
+        self.assertEqual(row["failingStreak"], 0)
+        self.assertEqual(row["quietStreak"], 0)
+        self.assertFalse(row["flaggedFailing"])
+        self.assertFalse(row["flaggedQuiet"])
+        self.assertEqual(row["lastItemDate"], "2026-09-15")
+        self.assertEqual(row["sampleSize"], 3)
+
+    def test_a_source_failing_three_running_is_flagged_with_its_latest_error(self):
+        reports = [
+            rpt("2026-09-15", failed=[("Bad", "HTTP 429")]),
+            rpt("2026-09-14", failed=[("Bad", "HTTP 429")]),
+            rpt("2026-09-13", failed=[("Bad", "HTTP 500")]),
+        ]
+        [row] = appmod.source_health(reports, ["Bad"])
+        self.assertEqual(row["failingStreak"], 3)
+        self.assertTrue(row["flaggedFailing"])
+        self.assertEqual(row["lastError"], "HTTP 429")
+        self.assertEqual(row["sampleSize"], 3)
+
+    def test_a_source_quiet_three_running_is_flagged_distinctly_from_failing(self):
+        reports = [
+            rpt("2026-09-15", quiet=["Slow"]),
+            rpt("2026-09-14", quiet=["Slow"]),
+            rpt("2026-09-13", quiet=["Slow"]),
+        ]
+        [row] = appmod.source_health(reports, ["Slow"])
+        self.assertEqual(row["quietStreak"], 3)
+        self.assertTrue(row["flaggedQuiet"])
+        self.assertEqual(row["failingStreak"], 0)
+        self.assertFalse(row["flaggedFailing"])
+        self.assertIsNone(row["lastItemDate"])
+
+    def test_a_source_that_recovered_has_its_streak_reset(self):
+        """Newest-first: today answered fine, so the failing streak is 0 even
+        though the source failed for days before that --- a recovered source
+        must not still read as broken."""
+        reports = [
+            rpt("2026-09-15", ok=["Flaky"]),                       # ok today
+            rpt("2026-09-14", failed=[("Flaky", "HTTP 503")]),
+            rpt("2026-09-13", failed=[("Flaky", "HTTP 503")]),
+            rpt("2026-09-12", failed=[("Flaky", "HTTP 503")]),
+        ]
+        [row] = appmod.source_health(reports, ["Flaky"])
+        self.assertEqual(row["failingStreak"], 0)
+        self.assertFalse(row["flaggedFailing"])
+        self.assertEqual(row["lastItemDate"], "2026-09-15")
+
+    def test_fewer_stored_reports_than_the_threshold_says_so(self):
+        """Two failing reports is all the history there is --- it must read as
+        a 2-report streak out of a 2-report sample, not as a confirmed 3-day
+        pattern it cannot actually support."""
+        reports = [
+            rpt("2026-09-15", failed=[("New", "HTTP 404")]),
+            rpt("2026-09-14", failed=[("New", "HTTP 404")]),
+        ]
+        [row] = appmod.source_health(reports, ["New"], threshold=3)
+        self.assertEqual(row["failingStreak"], 2)
+        self.assertEqual(row["sampleSize"], 2)
+        self.assertFalse(row["flaggedFailing"],
+                         "2 failing days out of 2 stored reports is not yet 3 running")
+
+    def test_names_are_returned_in_the_order_given_regardless_of_flags(self):
+        reports = [rpt("2026-09-15")]
+        rows = appmod.source_health(reports, ["A", "B", "C"])
+        self.assertEqual([r["name"] for r in rows], ["A", "B", "C"])
+
+    def test_a_source_absent_before_it_existed_never_fabricates_a_last_item_date(self):
+        """The regression this rollup shipped with: a source added to
+        sources.py two days ago is absent from every older report, not
+        quietly "ok" in them. Absence must never be read as the source
+        having answered with items on a day it was never even fetched."""
+        reports = [
+            rpt("2026-09-15", failed=[("New", "HTTP 404")]),
+            rpt("2026-09-14", failed=[("New", "HTTP 404")]),
+            rpt("2026-09-13"), rpt("2026-09-12"), rpt("2026-09-11"),
+        ]
+        [row] = appmod.source_health(reports, ["New"], threshold=3)
+        self.assertIsNone(row["lastItemDate"],
+                          "New has never once answered with an item")
+        self.assertEqual(row["failingStreak"], 2)
+        self.assertEqual(row["sampleSize"], 2,
+                         "only the two reports New actually appears in count")
+        self.assertFalse(row["flaggedFailing"])
+
+    def test_a_source_absent_from_every_retained_report_is_all_zero_not_ok(self):
+        reports = [rpt("2026-09-15"), rpt("2026-09-14"), rpt("2026-09-13")]
+        [row] = appmod.source_health(reports, ["NeverAdded"])
+        self.assertEqual(row["failingStreak"], 0)
+        self.assertEqual(row["quietStreak"], 0)
+        self.assertIsNone(row["lastItemDate"])
+        self.assertEqual(row["sampleSize"], 0)
+        self.assertFalse(row["flaggedFailing"])
+        self.assertFalse(row["flaggedQuiet"])
+
+    def test_an_absence_gap_neither_extends_nor_breaks_a_failing_streak(self):
+        """A day the source was not fetched is not evidence it failed again
+        (it cannot extend the streak) and not evidence it recovered either
+        (it cannot break the streak) --- it is simply not counted."""
+        reports = [
+            rpt("2026-09-15", failed=[("Gappy", "HTTP 500")]),
+            rpt("2026-09-14"),                                    # absent
+            rpt("2026-09-13", failed=[("Gappy", "HTTP 500")]),
+        ]
+        [row] = appmod.source_health(reports, ["Gappy"])
+        self.assertEqual(row["failingStreak"], 2)
+        self.assertEqual(row["sampleSize"], 2)
+
 
 class TestCollect(unittest.TestCase):
     def test_collect_stores_a_report_and_returns_it(self):

@@ -72,6 +72,21 @@
           </div>
         </section>
 
+        <section class="section" id="healthTrendSection" hidden>
+          <div class="section-head">
+            <h1>Source health</h1>
+            <span class="muted small">streaks across stored history, not just today</span>
+          </div>
+          <div class="card tight">
+            <p class="small muted nudge">Flagged only after it repeats --- one bad
+              morning is noise, the same source failing or gone quiet for several
+              mornings running is a pattern worth a look. Nothing here is dropped
+              from collection, and nothing here edits <code>sources.py</code>;
+              that list is a human's call.</p>
+            <div id="healthTrend" class="rows"></div>
+          </div>
+        </section>
+
         <section class="section" id="historySection" hidden>
           <div class="section-head">
             <h1>Earlier</h1>
