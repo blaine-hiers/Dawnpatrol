@@ -118,13 +118,19 @@ def _history() -> list[dict]:
 
 
 def _source_status(report: dict, name: str) -> tuple[str, str]:
-    """("failed" | "quiet" | "ok", error) for one source in one stored report.
+    """("failed" | "quiet" | "ok" | "absent", error) for one source in one
+    stored report.
 
-    `failed` and `quiet` come straight from the per-source records
-    `digest.build()` already stores. A name in neither list is not a gap in
-    the data --- `build()` sorts every fetched source into exactly one of
-    three buckets (failed, quiet, or answered-with-items; see `feeds.py`'s
-    module docstring), so the third bucket is simply "not in the other two."
+    `failed`, `quiet` and `ok` come straight from the per-source records
+    `digest.build()` stores --- every source it actually fetched that day
+    lands in exactly one of those three. `"absent"` is the fourth, different
+    case this function has to name explicitly: the source is in none of the
+    three lists because it was never part of that day's fetch at all, most
+    often because it had not been added to `sources.py` yet. Treating that
+    silently as `"ok"` (the old bug here) fabricates a day the source
+    answered with items when it was never even tried --- exactly the kind of
+    reassuring falsehood `feeds.py`'s module docstring warns against, just
+    across days instead of within one.
     """
     for f in report.get("failed", []):
         if f.get("name") == name:
@@ -132,7 +138,10 @@ def _source_status(report: dict, name: str) -> tuple[str, str]:
     for q in report.get("quiet", []):
         if q.get("name") == name:
             return "quiet", ""
-    return "ok", ""
+    for o in report.get("ok", []):
+        if o.get("name") == name:
+            return "ok", ""
+    return "absent", ""
 
 
 def source_health(reports: list[dict], names: list[str],
@@ -158,9 +167,18 @@ def source_health(reports: list[dict], names: list[str],
 
     Returns every name in `names`, not just the flagged ones, so a clean
     source is visibly clean (zero streaks) rather than simply absent.
+
+    A report where the source is `"absent"` (see `_source_status`) is
+    skipped rather than folded into either streak. It cannot extend a streak
+    --- nothing was actually observed to repeat that day --- and it cannot
+    break one either, because "we didn't look" is not evidence of recovery.
+    Skipping it also means `sampleSize` below counts only reports the source
+    was actually *in*, not every retained report; otherwise a source added
+    last week would report "failing 2 of 60" instead of the honest "failing
+    2 of 2", which is the exact shape of the bug this function exists to
+    rule out.
     """
     ordered = sorted(reports, key=lambda r: r.get("id", ""), reverse=True)
-    sample_size = len(ordered)
 
     rows = []
     for name in names:
@@ -168,9 +186,13 @@ def source_health(reports: list[dict], names: list[str],
         still_failing = still_quiet = True
         last_error = ""
         last_item_date: str | None = None
+        observed = 0
 
         for r in ordered:
             status, err = _source_status(r, name)
+            if status == "absent":
+                continue
+            observed += 1
             if status == "failed":
                 if still_failing:
                     failing_streak += 1
@@ -194,7 +216,7 @@ def source_health(reports: list[dict], names: list[str],
             "quietStreak": quiet_streak,
             "flaggedQuiet": quiet_streak >= threshold,
             "lastItemDate": last_item_date,
-            "sampleSize": sample_size,
+            "sampleSize": observed,
         })
     return rows
 

@@ -266,7 +266,12 @@
     var host = $("#healthTrend");
     UI.clear(host);
     flagged.forEach(function (r) {
-      var samples = r.sampleSize + " retained " + UI.pluralize(r.sampleSize, "report", "reports");
+      /* sampleSize counts reports the source actually appeared in, not every
+         retained report --- a source added last week must read as "2 of 2
+         observed", never "2 of 60 retained", or the denominator lies about
+         history the source was never even part of. */
+      var samples = r.sampleSize + " observed " +
+        UI.pluralize(r.sampleSize, "report", "reports");
 
       /* Failing and quiet are never merged into one line --- a 429 streak and
          a slow-week streak are different facts (feeds.py's own docstring),
@@ -277,7 +282,8 @@
           el("div", { class: "grow" }, [
             el("div", { class: "rtitle", text: r.name }, []),
             el("div", { class: "rsub",
-                        text: (r.lastError || "no error recorded") + " · " + samples }, [])
+                        text: (r.lastError || "no error recorded") + " · " + samples +
+                              (r.lastItemDate ? "" : " · never answered with an item") }, [])
           ]),
           el("span", { class: "badge bad",
                         text: "failing " + r.failingStreak + " days running" }, [])
@@ -289,7 +295,7 @@
             el("div", { class: "rtitle", text: r.name }, []),
             el("div", { class: "rsub",
                         text: (r.lastItemDate ? "last had items " + r.lastItemDate
-                                               : "no items in retained history") +
+                                               : "never answered with an item") +
                               " · " + samples }, [])
           ]),
           el("span", { class: "badge warn",
