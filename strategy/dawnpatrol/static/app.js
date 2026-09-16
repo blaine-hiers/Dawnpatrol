@@ -273,6 +273,19 @@
       var samples = r.sampleSize + " observed " +
         UI.pluralize(r.sampleSize, "report", "reports");
 
+      /* "never answered with an item" is only sayable when the whole retained
+         history could actually be read. Reports stored before per-source `ok`
+         records existed cannot tell a source that answered from one that did
+         not exist yet, so claiming "never" off the back of them would print a
+         falsehood about a feed that may have answered every morning for two
+         months. Say what is known instead, and say how much is not. */
+      var noItems = r.historyIncomplete
+        ? "no answer on record in the " + samples + " that carry one · " +
+          r.unclassifiedReports + " older " +
+          UI.pluralize(r.unclassifiedReports, "report", "reports") +
+          " cannot say"
+        : "never answered with an item";
+
       /* Failing and quiet are never merged into one line --- a 429 streak and
          a slow-week streak are different facts (feeds.py's own docstring),
          and a source stuck in one state cannot be in the other at once, so
@@ -283,7 +296,7 @@
             el("div", { class: "rtitle", text: r.name }, []),
             el("div", { class: "rsub",
                         text: (r.lastError || "no error recorded") + " · " + samples +
-                              (r.lastItemDate ? "" : " · never answered with an item") }, [])
+                              (r.lastItemDate ? "" : " · " + noItems) }, [])
           ]),
           el("span", { class: "badge bad",
                         text: "failing " + r.failingStreak + " days running" }, [])
@@ -294,9 +307,8 @@
           el("div", { class: "grow" }, [
             el("div", { class: "rtitle", text: r.name }, []),
             el("div", { class: "rsub",
-                        text: (r.lastItemDate ? "last had items " + r.lastItemDate
-                                               : "never answered with an item") +
-                              " · " + samples }, [])
+                        text: (r.lastItemDate ? "last had items " + r.lastItemDate + " · " + samples
+                                               : noItems) }, [])
           ]),
           el("span", { class: "badge warn",
                         text: "quiet " + r.quietStreak + " days running" }, [])

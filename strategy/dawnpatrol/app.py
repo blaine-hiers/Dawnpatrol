@@ -118,8 +118,8 @@ def _history() -> list[dict]:
 
 
 def _source_status(report: dict, name: str) -> tuple[str, str]:
-    """("failed" | "quiet" | "ok" | "absent", error) for one source in one
-    stored report.
+    """("failed" | "quiet" | "ok" | "absent" | "unknown", error) for one
+    source in one stored report.
 
     `failed`, `quiet` and `ok` come straight from the per-source records
     `digest.build()` stores --- every source it actually fetched that day
@@ -141,6 +141,18 @@ def _source_status(report: dict, name: str) -> tuple[str, str]:
     for o in report.get("ok", []):
         if o.get("name") == name:
             return "ok", ""
+    if "ok" not in report:
+        # Stored before the `ok` bucket existed. Such a report records which
+        # sources failed and which were quiet, but not which were fetched and
+        # answered --- so "in neither list" could mean the source answered
+        # fine, or that it did not exist yet. Those are the two readings this
+        # function exists to keep apart, and an old report simply does not
+        # carry the fact. Guessing either way puts a sentence on the screen
+        # that nothing on disk supports: guessing "ok" invents a morning the
+        # source answered, guessing "absent" erases every morning it did.
+        # `KEEP_REPORTS` is 60, so an install carries at most two months of
+        # these and they age out on their own --- no migration needed.
+        return "unknown", ""
     return "absent", ""
 
 
@@ -187,10 +199,23 @@ def source_health(reports: list[dict], names: list[str],
         last_error = ""
         last_item_date: str | None = None
         observed = 0
+        unclassified = 0
 
         for r in ordered:
             status, err = _source_status(r, name)
             if status == "absent":
+                continue
+            if status == "unknown":
+                # A report from before per-source `ok` records existed. It
+                # cannot confirm the source answered, so it must not set
+                # `lastItemDate` --- but neither is it evidence of failure, so
+                # it ends any streak rather than extending one. Ending is the
+                # conservative direction: extending would cry wolf about a
+                # feed that may well have been fine, and this feature's whole
+                # claim is that what is on the screen is carried by what is on
+                # disk.
+                unclassified += 1
+                still_failing = still_quiet = False
                 continue
             observed += 1
             if status == "failed":
@@ -217,6 +242,12 @@ def source_health(reports: list[dict], names: list[str],
             "flaggedQuiet": quiet_streak >= threshold,
             "lastItemDate": last_item_date,
             "sampleSize": observed,
+            # True when some retained report predates per-source `ok` records.
+            # Without it the UI cannot tell "this source has never answered
+            # with an item" from "the older reports cannot say either way",
+            # and would print the first while only the second is known.
+            "historyIncomplete": unclassified > 0,
+            "unclassifiedReports": unclassified,
         })
     return rows
 

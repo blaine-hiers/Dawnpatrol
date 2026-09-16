@@ -96,6 +96,21 @@ class TestState(unittest.TestCase):
         self.assertEqual(data["healthStreakDays"], appmod.HEALTH_STREAK_DAYS)
 
 
+def old_rpt(report_id, failed=(), quiet=()):
+    """A report in the format stored before per-source `ok` records existed.
+
+    The distinguishing fact is the *absence* of the `ok` key entirely --- not
+    an empty one. An install upgrading into source health carries up to
+    `KEEP_REPORTS` of these, and they cannot say whether a source that is in
+    neither list answered that morning or did not exist yet.
+    """
+    return {
+        "id": report_id,
+        "failed": [{"name": n, "error": e} for n, e in failed],
+        "quiet": [{"name": n} for n in quiet],
+    }
+
+
 def rpt(report_id, failed=(), quiet=(), ok=()):
     """A minimal stored report --- just the fields source_health() reads.
 
@@ -120,6 +135,65 @@ class TestSourceHealth(unittest.TestCase):
     docstring is explicit that a 429 and an empty Saturday are different
     facts, and this rollup exists specifically not to flatten that.
     """
+
+    def test_a_long_healthy_source_is_never_called_never_answered(self):
+        """The inverse of the absent bug, and just as false on screen.
+
+        Reports stored before the `ok` bucket existed cannot say whether a
+        source answered. Reading them as "absent" would erase every morning
+        it did answer and let the screen say "never answered with an item"
+        about a feed that answered daily until three days ago.
+        """
+        reports = ([old_rpt(f"2026-07-{d:02d}") for d in range(1, 29)] +
+                   [rpt("2026-09-13", failed=[("Steady", "HTTP 429")]),
+                    rpt("2026-09-14", failed=[("Steady", "HTTP 429")]),
+                    rpt("2026-09-15", failed=[("Steady", "HTTP 429")])])
+        [row] = appmod.source_health(reports, ["Steady"])
+
+        self.assertEqual(row["failingStreak"], 3)
+        self.assertTrue(row["flaggedFailing"])
+        # The claim the UI must not be allowed to make.
+        self.assertTrue(row["historyIncomplete"],
+                        "old-format reports must be reported as unreadable, "
+                        "not silently treated as evidence of anything")
+        self.assertEqual(row["unclassifiedReports"], 28)
+        # Only the three readable reports count toward the denominator.
+        self.assertEqual(row["sampleSize"], 3)
+
+    def test_an_unreadable_report_ends_a_streak_rather_than_extending_it(self):
+        """Walking newest-first: failed, failed, <unreadable>, failed.
+
+        The unreadable day is not evidence the source failed, so the streak
+        stops at 2. Extending it to 4 would cry wolf about a morning nothing
+        on disk describes.
+        """
+        reports = [rpt("2026-09-15", failed=[("Drifty", "HTTP 404")]),
+                   rpt("2026-09-14", failed=[("Drifty", "HTTP 404")]),
+                   old_rpt("2026-09-13"),
+                   rpt("2026-09-12", failed=[("Drifty", "HTTP 404")])]
+        [row] = appmod.source_health(reports, ["Drifty"])
+
+        self.assertEqual(row["failingStreak"], 2)
+        self.assertTrue(row["historyIncomplete"])
+
+    def test_a_fully_readable_history_is_not_marked_incomplete(self):
+        """historyIncomplete must stay off once old reports have aged out."""
+        reports = [rpt("2026-09-15", ok=["Good"]),
+                   rpt("2026-09-14", ok=["Good"])]
+        [row] = appmod.source_health(reports, ["Good"])
+
+        self.assertFalse(row["historyIncomplete"])
+        self.assertEqual(row["unclassifiedReports"], 0)
+        self.assertEqual(row["lastItemDate"], "2026-09-15")
+
+    def test_an_unreadable_report_never_fabricates_a_last_item_date(self):
+        """It cannot confirm an answer, so it must not date one."""
+        reports = [old_rpt("2026-09-15"), old_rpt("2026-09-14")]
+        [row] = appmod.source_health(reports, ["Mystery"])
+
+        self.assertIsNone(row["lastItemDate"])
+        self.assertEqual(row["sampleSize"], 0)
+        self.assertTrue(row["historyIncomplete"])
 
     def test_a_clean_source_has_no_streaks(self):
         reports = [rpt("2026-09-13", ok=["Good"]),
