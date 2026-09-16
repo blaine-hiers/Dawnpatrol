@@ -258,6 +258,47 @@
     }
   }
 
+  function renderHealthTrend() {
+    var rows = (state && state.health) || [];
+    var flagged = rows.filter(function (r) { return r.flaggedFailing || r.flaggedQuiet; });
+    $("#healthTrendSection").hidden = flagged.length === 0;
+
+    var host = $("#healthTrend");
+    UI.clear(host);
+    flagged.forEach(function (r) {
+      var samples = r.sampleSize + " retained " + UI.pluralize(r.sampleSize, "report", "reports");
+
+      /* Failing and quiet are never merged into one line --- a 429 streak and
+         a slow-week streak are different facts (feeds.py's own docstring),
+         and a source stuck in one state cannot be in the other at once, so
+         each gets its own row and its own badge colour when it applies. */
+      if (r.flaggedFailing) {
+        host.appendChild(el("div", { class: "row" }, [
+          el("div", { class: "grow" }, [
+            el("div", { class: "rtitle", text: r.name }, []),
+            el("div", { class: "rsub",
+                        text: (r.lastError || "no error recorded") + " · " + samples }, [])
+          ]),
+          el("span", { class: "badge bad",
+                        text: "failing " + r.failingStreak + " days running" }, [])
+        ]));
+      }
+      if (r.flaggedQuiet) {
+        host.appendChild(el("div", { class: "row" }, [
+          el("div", { class: "grow" }, [
+            el("div", { class: "rtitle", text: r.name }, []),
+            el("div", { class: "rsub",
+                        text: (r.lastItemDate ? "last had items " + r.lastItemDate
+                                               : "no items in retained history") +
+                              " · " + samples }, [])
+          ]),
+          el("span", { class: "badge warn",
+                        text: "quiet " + r.quietStreak + " days running" }, [])
+        ]));
+      }
+    });
+  }
+
   function renderHistory() {
     var hist = (state && state.history) || [];
     $("#historySection").hidden = hist.length < 2;
@@ -282,6 +323,7 @@
     renderStories();
     renderKept();
     renderHealth();
+    renderHealthTrend();
     renderHistory();
   }
 

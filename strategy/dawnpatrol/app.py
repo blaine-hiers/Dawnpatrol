@@ -57,6 +57,13 @@ KEPT = "kept"
 WINDOW_DAYS = 3
 KEEP_REPORTS = 60          # two months of mornings is plenty of history
 
+# A source failing (or gone quiet) this many stored reports running gets
+# flagged. Three mornings is enough to stop being "it hiccuped" and start
+# being a pattern; one bad morning is still noise. This only informs a human
+# looking at the screen -- see `source_health()` below for why it never
+# touches `sources.py` itself.
+HEALTH_STREAK_DAYS = 3
+
 
 def _today_id(when_ms: int | None = None) -> str:
     return time.strftime("%Y-%m-%d", time.localtime((when_ms or int(time.time() * 1000)) / 1000))
@@ -110,6 +117,88 @@ def _history() -> list[dict]:
             for r in store.all(REPORTS)]
 
 
+def _source_status(report: dict, name: str) -> tuple[str, str]:
+    """("failed" | "quiet" | "ok", error) for one source in one stored report.
+
+    `failed` and `quiet` come straight from the per-source records
+    `digest.build()` already stores. A name in neither list is not a gap in
+    the data --- `build()` sorts every fetched source into exactly one of
+    three buckets (failed, quiet, or answered-with-items; see `feeds.py`'s
+    module docstring), so the third bucket is simply "not in the other two."
+    """
+    for f in report.get("failed", []):
+        if f.get("name") == name:
+            return "failed", f.get("error", "")
+    for q in report.get("quiet", []):
+        if q.get("name") == name:
+            return "quiet", ""
+    return "ok", ""
+
+
+def source_health(reports: list[dict], names: list[str],
+                   threshold: int = HEALTH_STREAK_DAYS) -> list[dict]:
+    """One row per source, computed from stored history rather than today's
+    fetch alone.
+
+    A feed that has answered HTTP 429 every morning for three weeks looks
+    exactly like a feed that hiccuped once this morning, on any single day's
+    report. Telling those apart means walking backward through what
+    `KEEP_REPORTS` already keeps on disk, newest first, and stopping the count
+    the moment the pattern breaks --- the same discipline `feeds.py` uses for
+    a single fetch, applied across days instead of within one.
+
+    Failing and quiet streaks are counted separately and never merged into one
+    number: `feeds.py`'s own docstring is explicit that "nothing because the
+    network is down" and "nothing because it is Saturday" are different facts,
+    and collapsing a 429 streak and a slow-week streak into one "flagged"
+    count would be exactly the flattening that module warns against.
+
+    This never looks at or edits `sources.py` --- a rollup entry is
+    information for a human to act on, not a mechanism that acts on its own.
+
+    Returns every name in `names`, not just the flagged ones, so a clean
+    source is visibly clean (zero streaks) rather than simply absent.
+    """
+    ordered = sorted(reports, key=lambda r: r.get("id", ""), reverse=True)
+    sample_size = len(ordered)
+
+    rows = []
+    for name in names:
+        failing_streak = quiet_streak = 0
+        still_failing = still_quiet = True
+        last_error = ""
+        last_item_date: str | None = None
+
+        for r in ordered:
+            status, err = _source_status(r, name)
+            if status == "failed":
+                if still_failing:
+                    failing_streak += 1
+                    if not last_error:
+                        last_error = err
+                still_quiet = False
+            elif status == "quiet":
+                if still_quiet:
+                    quiet_streak += 1
+                still_failing = False
+            else:  # "ok" --- answered with at least one item
+                still_failing = still_quiet = False
+                if last_item_date is None:
+                    last_item_date = r.get("id")
+
+        rows.append({
+            "name": name,
+            "failingStreak": failing_streak,
+            "lastError": last_error,
+            "flaggedFailing": failing_streak >= threshold,
+            "quietStreak": quiet_streak,
+            "flaggedQuiet": quiet_streak >= threshold,
+            "lastItemDate": last_item_date,
+            "sampleSize": sample_size,
+        })
+    return rows
+
+
 def _staleness(report: dict | None) -> dict:
     if not report:
         return {"stale": True, "hours": 0,
@@ -138,6 +227,9 @@ def state(req):
         "deadFeeds": [{"name": n, "url": u, "why": w}
                       for n, u, w in sources.DEAD_FEEDS],
         "claudeAvailable": synth.available(),
+        "health": source_health(store.all(REPORTS),
+                                 [s["name"] for s in sources.SOURCES]),
+        "healthStreakDays": HEALTH_STREAK_DAYS,
     }
 
 

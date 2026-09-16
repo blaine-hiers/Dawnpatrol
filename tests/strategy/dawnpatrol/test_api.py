@@ -89,6 +89,103 @@ class TestState(unittest.TestCase):
         self.assertTrue(any("Anthropic" in d["name"] for d in data["deadFeeds"]),
                         "the dead feeds are shown, not quietly pruned")
 
+    def test_state_carries_a_health_row_for_every_source(self):
+        status, data = call("GET", "/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["health"]), data["sourceCount"])
+        self.assertEqual(data["healthStreakDays"], appmod.HEALTH_STREAK_DAYS)
+
+
+def rpt(report_id, failed=(), quiet=()):
+    """A minimal stored report --- just the fields source_health() reads.
+
+    `failed`/`quiet` are `(name, error)` / `name` pairs, matching the shape
+    `feeds.FetchResult.to_json()` actually produces.
+    """
+    return {
+        "id": report_id,
+        "failed": [{"name": n, "error": e} for n, e in failed],
+        "quiet": [{"name": n} for n in quiet],
+    }
+
+
+class TestSourceHealth(unittest.TestCase):
+    """The rollup: computed from stored reports, not from today's fetch alone.
+
+    Failing and quiet streaks must never blur together --- feeds.py's own
+    docstring is explicit that a 429 and an empty Saturday are different
+    facts, and this rollup exists specifically not to flatten that.
+    """
+
+    def test_a_clean_source_has_no_streaks(self):
+        reports = [rpt("2026-09-13"), rpt("2026-09-14"), rpt("2026-09-15")]
+        [row] = appmod.source_health(reports, ["Good"])
+        self.assertEqual(row["failingStreak"], 0)
+        self.assertEqual(row["quietStreak"], 0)
+        self.assertFalse(row["flaggedFailing"])
+        self.assertFalse(row["flaggedQuiet"])
+        self.assertEqual(row["lastItemDate"], "2026-09-15")
+        self.assertEqual(row["sampleSize"], 3)
+
+    def test_a_source_failing_three_running_is_flagged_with_its_latest_error(self):
+        reports = [
+            rpt("2026-09-15", failed=[("Bad", "HTTP 429")]),
+            rpt("2026-09-14", failed=[("Bad", "HTTP 429")]),
+            rpt("2026-09-13", failed=[("Bad", "HTTP 500")]),
+        ]
+        [row] = appmod.source_health(reports, ["Bad"])
+        self.assertEqual(row["failingStreak"], 3)
+        self.assertTrue(row["flaggedFailing"])
+        self.assertEqual(row["lastError"], "HTTP 429")
+        self.assertEqual(row["sampleSize"], 3)
+
+    def test_a_source_quiet_three_running_is_flagged_distinctly_from_failing(self):
+        reports = [
+            rpt("2026-09-15", quiet=["Slow"]),
+            rpt("2026-09-14", quiet=["Slow"]),
+            rpt("2026-09-13", quiet=["Slow"]),
+        ]
+        [row] = appmod.source_health(reports, ["Slow"])
+        self.assertEqual(row["quietStreak"], 3)
+        self.assertTrue(row["flaggedQuiet"])
+        self.assertEqual(row["failingStreak"], 0)
+        self.assertFalse(row["flaggedFailing"])
+        self.assertIsNone(row["lastItemDate"])
+
+    def test_a_source_that_recovered_has_its_streak_reset(self):
+        """Newest-first: today answered fine, so the failing streak is 0 even
+        though the source failed for days before that --- a recovered source
+        must not still read as broken."""
+        reports = [
+            rpt("2026-09-15"),                                    # ok today
+            rpt("2026-09-14", failed=[("Flaky", "HTTP 503")]),
+            rpt("2026-09-13", failed=[("Flaky", "HTTP 503")]),
+            rpt("2026-09-12", failed=[("Flaky", "HTTP 503")]),
+        ]
+        [row] = appmod.source_health(reports, ["Flaky"])
+        self.assertEqual(row["failingStreak"], 0)
+        self.assertFalse(row["flaggedFailing"])
+        self.assertEqual(row["lastItemDate"], "2026-09-15")
+
+    def test_fewer_stored_reports_than_the_threshold_says_so(self):
+        """Two failing reports is all the history there is --- it must read as
+        a 2-report streak out of a 2-report sample, not as a confirmed 3-day
+        pattern it cannot actually support."""
+        reports = [
+            rpt("2026-09-15", failed=[("New", "HTTP 404")]),
+            rpt("2026-09-14", failed=[("New", "HTTP 404")]),
+        ]
+        [row] = appmod.source_health(reports, ["New"], threshold=3)
+        self.assertEqual(row["failingStreak"], 2)
+        self.assertEqual(row["sampleSize"], 2)
+        self.assertFalse(row["flaggedFailing"],
+                         "2 failing days out of 2 stored reports is not yet 3 running")
+
+    def test_names_are_returned_in_the_order_given_regardless_of_flags(self):
+        reports = [rpt("2026-09-15")]
+        rows = appmod.source_health(reports, ["A", "B", "C"])
+        self.assertEqual([r["name"] for r in rows], ["A", "B", "C"])
+
 
 class TestCollect(unittest.TestCase):
     def test_collect_stores_a_report_and_returns_it(self):
