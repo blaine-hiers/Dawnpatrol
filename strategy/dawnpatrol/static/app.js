@@ -126,6 +126,12 @@
     UI.clear(host);
     var stories = (shown && shown.stories) || [];
     $("#storiesEmpty").classList.toggle("hidden", stories.length > 0);
+    // The empty-state copy used to hardcode this number and drift the moment
+    // a feed was added or retired (issue #12) --- the API already reports
+    // the real count, so read it from there instead of a literal.
+    if (state && state.sourceCount) {
+      $("#sourceCount").textContent = state.sourceCount;
+    }
 
     // Switching to a different report starts the count over. Re-rendering
     // the same one (a kept-button click, a refresh) must not collapse a list
