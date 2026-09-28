@@ -126,6 +126,12 @@
     UI.clear(host);
     var stories = (shown && shown.stories) || [];
     $("#storiesEmpty").classList.toggle("hidden", stories.length > 0);
+    // The empty-state copy used to hardcode this number and drift the moment
+    // a feed was added or retired (issue #12) --- the API already reports
+    // the real count, so read it from there instead of a literal.
+    if (state && state.sourceCount) {
+      $("#sourceCount").textContent = state.sourceCount;
+    }
 
     // Switching to a different report starts the count over. Re-rendering
     // the same one (a kept-button click, a refresh) must not collapse a list
@@ -164,7 +170,21 @@
     var sec = $("#briefingSection");
     var text = shown && shown.summary;
     sec.hidden = !text;
-    if (text) $("#briefing").textContent = text;
+    if (text) {
+      /* The briefing is model-generated prose containing **bold** (see
+         synth.py's prompt). `textContent` showed the literal asterisks
+         (issue #11); `innerHTML` is not an option for text an LLM wrote --
+         so BriefingMD.parse() turns it into plain {bold, text} data and
+         every segment becomes a real DOM node here, never markup. A
+         "<script>" in the model's output is just a run of characters to
+         `el`/`createTextNode` and can never execute. */
+      var host = $("#briefing");
+      UI.clear(host);
+      BriefingMD.parseBriefingSegments(text).forEach(function (seg) {
+        host.appendChild(seg.bold ? el("strong", {}, [seg.text])
+                                   : document.createTextNode(seg.text));
+      });
+    }
 
     /* When there is no briefing, say why on the footer rather than leaving a
        silently missing section. */
@@ -185,8 +205,9 @@
   function renderKept() {
     var kept = (state && state.kept) || [];
     $("#keptSection").hidden = kept.length === 0;
-    $("#keptCount").textContent = kept.length +
-      " " + UI.pluralize(kept.length, "story", "stories");
+    // UI.pluralize already prefixes the count -- prepending it again is how
+    // "1 story" became "1 1 story" (issue #10).
+    $("#keptCount").textContent = UI.pluralize(kept.length, "story", "stories");
     var host = $("#kept");
     UI.clear(host);
     kept.forEach(function (k) {
@@ -271,8 +292,11 @@
          retained report --- a source added last week must read as "2 of 2
          observed", never "2 of 60 retained", or the denominator lies about
          history the source was never even part of. */
+      // Not UI.pluralize here (issue #10): it already prefixes the count, and
+      // "observed" has to sit between the count and the noun ("5 observed
+      // reports"), so the count would print twice.
       var samples = r.sampleSize + " observed " +
-        UI.pluralize(r.sampleSize, "report", "reports");
+        (r.sampleSize === 1 ? "report" : "reports");
 
       /* "never answered with an item" is only sayable when the whole retained
          history could actually be read. Reports stored before per-source `ok`
@@ -283,7 +307,7 @@
       var noItems = r.historyIncomplete
         ? "no answer on record in the " + samples + " that carry one · " +
           r.unclassifiedReports + " older " +
-          UI.pluralize(r.unclassifiedReports, "report", "reports") +
+          (r.unclassifiedReports === 1 ? "report" : "reports") +
           " cannot say"
         : "never answered with an item";
 

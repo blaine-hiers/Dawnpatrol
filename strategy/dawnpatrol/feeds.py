@@ -281,6 +281,18 @@ class _TooBig(Exception):
         super().__init__(f"{what} exceeds the {limit} byte limit")
 
 
+def _fmt_bytes(n: int) -> str:
+    """A byte count as the unit a person would actually say. The shipped caps
+    are tens/hundreds of MB, but the message must not lie about a cap lowered
+    for a test (or, someday, a config) below 1 MB --- `n // (1024*1024)` on a
+    1000-byte limit rounds to "0 MB", which describes no limit at all."""
+    if n >= 1024 * 1024:
+        return f"{n // (1024 * 1024)} MB"
+    if n >= 1024:
+        return f"{n // 1024} KB"
+    return f"{n} bytes"
+
+
 class _ShortRead(Exception):
     """The connection closed before the body finished arriving."""
 
@@ -369,7 +381,33 @@ def _inflate_capped(data: bytes, wbits: int, limit: int) -> bytes:
       exactly the shape of a compressible feed. Bounding the input side too
       keeps `unconsumed_tail` itself small (at most one `_READ_CHUNK`), so
       re-slicing it costs nothing.
+
+    Two edge cases decided deliberately, both to match `gzip.decompress`'s
+    own behaviour rather than differing from it by accident:
+
+    * **Zero-padding** between members, or after the last one, (some
+      encoders emit this) is discarded rather than fed to a fresh
+      decompressor as though it were another member. `\\x00\\x00` can never
+      be a real member's magic bytes, so nothing that could ever be valid
+      data is being dropped — and without this, that padding raised
+      `zlib.error`, which `_decompress` reads as "not actually compressed"
+      and returns the raw *compressed* bytes, turning a perfectly good feed
+      into a parse failure. Non-zero trailing junk is not given the same
+      pass: it is not padding, it is corruption, and it still raises below,
+      same as before this function existed.
+    * **A truncated stream** (cut off before its member completes) raises
+      `EOFError` instead of returning whatever partially inflated. The old
+      one-shot `gzip.decompress` raised `EOFError` on exactly this input;
+      silently returning a partial document would hand `parse()` a feed
+      that looks merely malformed instead of a fetch that was actually cut
+      short — the same "reported failure over silent wrong data" rule this
+      module's own docstring states for every other failure mode. Empty
+      input is not truncation (`gzip.decompress(b"")` is `b""`, not an
+      error), so it is exempted below.
     """
+    if not data:
+        return b""
+
     out = bytearray()
     pos, n = 0, len(data)
     d = zlib.decompressobj(wbits)
@@ -392,37 +430,52 @@ def _inflate_capped(data: bytes, wbits: int, limit: int) -> bytes:
             pos, pending = n, b""
             if not leftover:
                 break
+            # Zero-padding is discarded wherever it falls, not just at the
+            # very end: `gzip.compress(A) + b"\x00"*8 + gzip.compress(B)` is
+            # a real (if unusual) two-member stream, and the padding between
+            # A and B is exactly as harmless as padding after B is. Only
+            # *leading* NULs need stripping here --- a real member's magic
+            # bytes are never zero, so whatever follows the padding, if
+            # anything, starts the next member unchanged. The size cap below
+            # still applies to that member's output once decompression of it
+            # begins; only the inert padding bytes themselves are skipped.
+            leftover = leftover.lstrip(b"\x00")
+            if not leftover:
+                break                      # nothing left but padding
             d = zlib.decompressobj(wbits)
             pending = leftover
 
     out.extend(d.flush())
     if len(out) > limit:
         raise _TooBig("decompressed body", limit)
+    if not d.eof:
+        raise EOFError("compressed stream ended before its last member did")
     return bytes(out)
 
 
 def _decompress(raw: bytes, encoding: str) -> bytes:
     """Undo Content-Encoding. A `_TooBig` here means genuinely too big; any
-    other decompression failure is treated as "not actually compressed" and
-    the bytes are returned as-is, same as before this file capped anything."""
+    other decompression failure — including `EOFError` on a truncated stream,
+    see `_inflate_capped` — is treated as "not actually compressed" and the
+    bytes are returned as-is, same as before this file capped anything."""
     if encoding == "gzip":
         try:
             return _inflate_capped(raw, zlib.MAX_WBITS | 16, MAX_DECOMPRESSED_BYTES)
         except _TooBig:
             raise
-        except (OSError, zlib.error):
+        except (EOFError, OSError, zlib.error):
             return raw
     if encoding == "deflate":
         try:
             return _inflate_capped(raw, zlib.MAX_WBITS, MAX_DECOMPRESSED_BYTES)
         except _TooBig:
             raise
-        except zlib.error:
+        except (EOFError, zlib.error):
             try:
                 return _inflate_capped(raw, -zlib.MAX_WBITS, MAX_DECOMPRESSED_BYTES)
             except _TooBig:
                 raise
-            except zlib.error:
+            except (EOFError, zlib.error):
                 return raw
     return raw
 
@@ -449,9 +502,8 @@ def fetch_one(source: dict, timeout: float = 25.0) -> FetchResult:
         return FetchResult(name, url, band, False,
                            error=f"could not reach it ({e.reason})")
     except _TooBig as e:
-        mb = e.limit // (1024 * 1024)
         return FetchResult(name, url, band, False,
-                           error=f"{e.what} is bigger than the {mb} MB limit")
+                           error=f"{e.what} is bigger than the {_fmt_bytes(e.limit)} limit")
     except _ShortRead as e:
         return FetchResult(name, url, band, False, error=str(e))
     except (TimeoutError, OSError) as e:

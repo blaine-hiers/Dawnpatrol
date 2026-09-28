@@ -151,6 +151,36 @@ class TestDeduplication(unittest.TestCase):
         self.assertIn("today", story["why"])
         self.assertFalse(any("no date in the feed" in line for line in story["why"]))
 
+    def test_same_url_merge_adopts_the_better_date_when_the_first_item_is_worse(self):
+        """Pass 1 (same canonical URL) used to only append to `also` and never
+        look at `published` --- so if the first-parsed copy was undated (or
+        worse-dated), the survivor kept that worse value even though a second
+        source proved a real date for the same URL."""
+        worse = feeds.Item("A thing happened", "https://x.com/a", "One", "press",
+                           0, dated=False)
+        better = feeds.Item("A thing happened", "https://x.com/a", "Two", "press",
+                            NOW - 3600_000, dated=True)
+        report = digest.build([result([worse], name="One"),
+                               result([better], name="Two")], now_ms=NOW)
+        self.assertEqual(len(report["stories"]), 1)
+        story = report["stories"][0]
+        self.assertEqual(story["published"], NOW - 3600_000)
+        self.assertTrue(story["dated"])
+
+    def test_same_url_merge_keeps_the_better_date_when_the_second_item_is_worse(self):
+        """Same fix, opposite feed order --- the merge must not fire only when
+        the better-dated copy happens to arrive second."""
+        better = feeds.Item("A thing happened", "https://x.com/a", "One", "press",
+                            NOW - 3600_000, dated=True)
+        worse = feeds.Item("A thing happened", "https://x.com/a", "Two", "press",
+                           0, dated=False)
+        report = digest.build([result([better], name="One"),
+                               result([worse], name="Two")], now_ms=NOW)
+        self.assertEqual(len(report["stories"]), 1)
+        story = report["stories"][0]
+        self.assertEqual(story["published"], NOW - 3600_000)
+        self.assertTrue(story["dated"])
+
 
 class TestWindow(unittest.TestCase):
     def test_items_older_than_the_window_are_dropped(self):

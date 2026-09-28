@@ -217,6 +217,14 @@ def build(results, now_ms: int | None = None, window_days: int = 3) -> dict:
                 existing = by_url[key]
                 if item.source != existing.source:
                     existing.also.append({"source": item.source, "url": item.url})
+                if item.published > existing.published:
+                    # Same fix as the title-overlap merge below: a same-URL
+                    # duplicate must not leave the survivor holding a worse
+                    # timestamp than one of its own corroborating sources
+                    # actually supplied. `dated` describes where `published`
+                    # came from, so it moves with it.
+                    existing.published = item.published
+                    existing.dated = item.dated
                 continue
             by_url[key] = Story(
                 title=item.title, url=item.url, source=item.source,
