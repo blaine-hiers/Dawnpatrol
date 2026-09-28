@@ -57,6 +57,13 @@ KEPT = "kept"
 WINDOW_DAYS = 3
 KEEP_REPORTS = 60          # two months of mornings is plenty of history
 
+# A source failing (or gone quiet) this many stored reports running gets
+# flagged. Three mornings is enough to stop being "it hiccuped" and start
+# being a pattern; one bad morning is still noise. This only informs a human
+# looking at the screen -- see `source_health()` below for why it never
+# touches `sources.py` itself.
+HEALTH_STREAK_DAYS = 3
+
 
 def _today_id(when_ms: int | None = None) -> str:
     return time.strftime("%Y-%m-%d", time.localtime((when_ms or int(time.time() * 1000)) / 1000))
@@ -110,6 +117,141 @@ def _history() -> list[dict]:
             for r in store.all(REPORTS)]
 
 
+def _source_status(report: dict, name: str) -> tuple[str, str]:
+    """("failed" | "quiet" | "ok" | "absent" | "unknown", error) for one
+    source in one stored report.
+
+    `failed`, `quiet` and `ok` come straight from the per-source records
+    `digest.build()` stores --- every source it actually fetched that day
+    lands in exactly one of those three. `"absent"` is the fourth, different
+    case this function has to name explicitly: the source is in none of the
+    three lists because it was never part of that day's fetch at all, most
+    often because it had not been added to `sources.py` yet. Treating that
+    silently as `"ok"` (the old bug here) fabricates a day the source
+    answered with items when it was never even tried --- exactly the kind of
+    reassuring falsehood `feeds.py`'s module docstring warns against, just
+    across days instead of within one.
+    """
+    for f in report.get("failed", []):
+        if f.get("name") == name:
+            return "failed", f.get("error", "")
+    for q in report.get("quiet", []):
+        if q.get("name") == name:
+            return "quiet", ""
+    for o in report.get("ok", []):
+        if o.get("name") == name:
+            return "ok", ""
+    if "ok" not in report:
+        # Stored before the `ok` bucket existed. Such a report records which
+        # sources failed and which were quiet, but not which were fetched and
+        # answered --- so "in neither list" could mean the source answered
+        # fine, or that it did not exist yet. Those are the two readings this
+        # function exists to keep apart, and an old report simply does not
+        # carry the fact. Guessing either way puts a sentence on the screen
+        # that nothing on disk supports: guessing "ok" invents a morning the
+        # source answered, guessing "absent" erases every morning it did.
+        # `KEEP_REPORTS` is 60, so an install carries at most two months of
+        # these and they age out on their own --- no migration needed.
+        return "unknown", ""
+    return "absent", ""
+
+
+def source_health(reports: list[dict], names: list[str],
+                   threshold: int = HEALTH_STREAK_DAYS) -> list[dict]:
+    """One row per source, computed from stored history rather than today's
+    fetch alone.
+
+    A feed that has answered HTTP 429 every morning for three weeks looks
+    exactly like a feed that hiccuped once this morning, on any single day's
+    report. Telling those apart means walking backward through what
+    `KEEP_REPORTS` already keeps on disk, newest first, and stopping the count
+    the moment the pattern breaks --- the same discipline `feeds.py` uses for
+    a single fetch, applied across days instead of within one.
+
+    Failing and quiet streaks are counted separately and never merged into one
+    number: `feeds.py`'s own docstring is explicit that "nothing because the
+    network is down" and "nothing because it is Saturday" are different facts,
+    and collapsing a 429 streak and a slow-week streak into one "flagged"
+    count would be exactly the flattening that module warns against.
+
+    This never looks at or edits `sources.py` --- a rollup entry is
+    information for a human to act on, not a mechanism that acts on its own.
+
+    Returns every name in `names`, not just the flagged ones, so a clean
+    source is visibly clean (zero streaks) rather than simply absent.
+
+    A report where the source is `"absent"` (see `_source_status`) is
+    skipped rather than folded into either streak. It cannot extend a streak
+    --- nothing was actually observed to repeat that day --- and it cannot
+    break one either, because "we didn't look" is not evidence of recovery.
+    Skipping it also means `sampleSize` below counts only reports the source
+    was actually *in*, not every retained report; otherwise a source added
+    last week would report "failing 2 of 60" instead of the honest "failing
+    2 of 2", which is the exact shape of the bug this function exists to
+    rule out.
+    """
+    ordered = sorted(reports, key=lambda r: r.get("id", ""), reverse=True)
+
+    rows = []
+    for name in names:
+        failing_streak = quiet_streak = 0
+        still_failing = still_quiet = True
+        last_error = ""
+        last_item_date: str | None = None
+        observed = 0
+        unclassified = 0
+
+        for r in ordered:
+            status, err = _source_status(r, name)
+            if status == "absent":
+                continue
+            if status == "unknown":
+                # A report from before per-source `ok` records existed. It
+                # cannot confirm the source answered, so it must not set
+                # `lastItemDate` --- but neither is it evidence of failure, so
+                # it ends any streak rather than extending one. Ending is the
+                # conservative direction: extending would cry wolf about a
+                # feed that may well have been fine, and this feature's whole
+                # claim is that what is on the screen is carried by what is on
+                # disk.
+                unclassified += 1
+                still_failing = still_quiet = False
+                continue
+            observed += 1
+            if status == "failed":
+                if still_failing:
+                    failing_streak += 1
+                    if not last_error:
+                        last_error = err
+                still_quiet = False
+            elif status == "quiet":
+                if still_quiet:
+                    quiet_streak += 1
+                still_failing = False
+            else:  # "ok" --- answered with at least one item
+                still_failing = still_quiet = False
+                if last_item_date is None:
+                    last_item_date = r.get("id")
+
+        rows.append({
+            "name": name,
+            "failingStreak": failing_streak,
+            "lastError": last_error,
+            "flaggedFailing": failing_streak >= threshold,
+            "quietStreak": quiet_streak,
+            "flaggedQuiet": quiet_streak >= threshold,
+            "lastItemDate": last_item_date,
+            "sampleSize": observed,
+            # True when some retained report predates per-source `ok` records.
+            # Without it the UI cannot tell "this source has never answered
+            # with an item" from "the older reports cannot say either way",
+            # and would print the first while only the second is known.
+            "historyIncomplete": unclassified > 0,
+            "unclassifiedReports": unclassified,
+        })
+    return rows
+
+
 def _staleness(report: dict | None) -> dict:
     if not report:
         return {"stale": True, "hours": 0,
@@ -138,6 +280,9 @@ def state(req):
         "deadFeeds": [{"name": n, "url": u, "why": w}
                       for n, u, w in sources.DEAD_FEEDS],
         "claudeAvailable": synth.available(),
+        "health": source_health(store.all(REPORTS),
+                                 [s["name"] for s in sources.SOURCES]),
+        "healthStreakDays": HEALTH_STREAK_DAYS,
     }
 
 
