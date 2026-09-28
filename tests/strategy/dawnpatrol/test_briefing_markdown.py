@@ -11,10 +11,20 @@ is enough to exercise it directly, same as any other unit under test here.
 
 If `node` is not on this machine, the suite skips rather than failing --
 a missing optional dev tool is not the same fact as a broken parser, and
-`py run_all_tests.py` must stay green either way.
+`py run_all_tests.py` must stay green either way on a dev machine that
+simply doesn't have Node.
+
+That leniency does not extend to CI. `CI` is a variable GitHub Actions
+(and effectively every other CI system) always sets, and this repo's own
+workflow does not install Node explicitly -- so a runner image that ever
+loses its bundled Node would silently *skip* the one test that proves a
+`<script>` in model output can't execute, rather than failing the build.
+Skipping is only for "this optional tool isn't installed here"; in CI,
+where Node is assumed to be present, its absence is a real failure.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -25,6 +35,7 @@ _APP = Path(__file__).resolve().parents[3] / "strategy" / "dawnpatrol"
 _SCRIPT = _APP / "static" / "briefing_markdown.js"
 
 NODE = shutil.which("node")
+IN_CI = bool(os.environ.get("CI"))
 
 
 def _parse(text: str) -> list[dict]:
@@ -42,8 +53,20 @@ def _parse(text: str) -> list[dict]:
     return json.loads(proc.stdout)
 
 
-@unittest.skipUnless(NODE, "node is not installed on this machine")
 class TestParseBriefingSegments(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if NODE:
+            return
+        if IN_CI:
+            # Fail, not skip: CI must not silently drop the injection test
+            # just because the runner happened to lack Node (issue #11).
+            raise AssertionError(
+                "node is not installed, and the CI env var is set -- "
+                "failing instead of skipping so this can't go unnoticed."
+            )
+        raise unittest.SkipTest("node is not installed on this machine")
+
     def test_plain_text_is_one_unbolded_segment(self):
         segs = _parse("nothing changed this week")
         self.assertEqual(segs, [{"bold": False, "text": "nothing changed this week"}])
