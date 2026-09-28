@@ -282,6 +282,43 @@ class TestSizeCeilings(unittest.TestCase):
         self.assertIn("closed early", res.error)
         self.assertIn("500", res.error)
 
+    def test_trailing_zero_padding_after_a_gzip_member_still_parses(self):
+        """Some encoders pad a gzip response with trailing NUL bytes;
+        `gzip.decompress` tolerates this and so must `_inflate_capped` —
+        the old one-shot path decoded this feed fine, and a decompression
+        rewrite must not turn it into a reported failure (issue #15)."""
+        padded = gzip.compress(RSS2) + b"\x00" * 16
+        self._serve(padded, {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "Padded", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(len(res.items), 1)
+
+    def test_a_truncated_gzip_stream_is_reported_not_partially_parsed(self):
+        """Cutting a gzip stream short of its final member must not hand
+        `parse` a partial document that merely happens to fail to parse —
+        it is reported as the fetch failure it actually is, matching what
+        the old one-shot `gzip.decompress` (which raised `EOFError`) did.
+        No `Content-Length` header here, on purpose: this exercises the
+        decompression-level detection, not `_read_capped`'s short-body
+        check, which would otherwise catch this first."""
+        truncated = gzip.compress(RSS2)[:-5]
+        self._serve(truncated, {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "Truncated", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertFalse(res.ok)
+
+    def test_cap_message_uses_a_sensible_unit_below_one_megabyte(self):
+        """`limit // (1024*1024)` reads "0 MB" for any cap under 1 MB, which
+        describes no limit at all."""
+        feeds.MAX_RESPONSE_BYTES = 1000
+        self._serve(b"x" * 2000)
+        res = feeds.fetch_one({"name": "Small", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertFalse(res.ok)
+        self.assertIn("1000 bytes", res.error)
+        self.assertNotIn("0 MB", res.error)
+
 
 class TestInflateCapped(unittest.TestCase):
     """Direct coverage of `_inflate_capped`'s multi-member handling, separate
@@ -299,6 +336,41 @@ class TestInflateCapped(unittest.TestCase):
     def test_a_single_member_still_works(self):
         got = feeds._inflate_capped(gzip.compress(RSS2), zlib.MAX_WBITS | 16, 10**9)
         self.assertEqual(got, RSS2)
+
+    def test_trailing_zero_padding_is_discarded_matching_gzip_decompress(self):
+        padded = gzip.compress(RSS2) + b"\x00" * 16
+        self.assertEqual(gzip.decompress(padded), RSS2)   # the fixture is real
+        got = feeds._inflate_capped(padded, zlib.MAX_WBITS | 16, 10**9)
+        self.assertEqual(got, RSS2)
+
+    def test_trailing_non_zero_junk_still_raises(self):
+        """Padding is forgiven; corruption is not. `\\x01` bytes can never be
+        a real member's magic, so this is not "another member" either --
+        it is the same failure a one-shot decompress would report."""
+        junk = gzip.compress(RSS2) + b"\x01" * 16
+        with self.assertRaises(zlib.error):
+            feeds._inflate_capped(junk, zlib.MAX_WBITS | 16, 10**9)
+
+    def test_a_truncated_stream_raises_eoferror(self):
+        truncated = gzip.compress(RSS2)[:-5]
+        with self.assertRaises(EOFError):
+            feeds._inflate_capped(truncated, zlib.MAX_WBITS | 16, 10**9)
+
+    def test_empty_input_is_empty_output_not_an_error(self):
+        """Matches `gzip.decompress(b"") == b""` -- empty is not truncated."""
+        self.assertEqual(feeds._inflate_capped(b"", zlib.MAX_WBITS | 16, 10**9), b"")
+
+
+class TestFmtBytes(unittest.TestCase):
+    def test_at_least_a_megabyte_is_reported_in_mb(self):
+        self.assertEqual(feeds._fmt_bytes(20 * 1024 * 1024), "20 MB")
+
+    def test_below_a_megabyte_is_reported_in_kb(self):
+        self.assertEqual(feeds._fmt_bytes(2048), "2 KB")
+
+    def test_below_a_kilobyte_is_reported_in_bytes(self):
+        self.assertEqual(feeds._fmt_bytes(500), "500 bytes")
+        self.assertNotIn("0 MB", feeds._fmt_bytes(500))
 
 
 class TestUserAgent(unittest.TestCase):
