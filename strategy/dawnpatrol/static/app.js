@@ -164,7 +164,21 @@
     var sec = $("#briefingSection");
     var text = shown && shown.summary;
     sec.hidden = !text;
-    if (text) $("#briefing").textContent = text;
+    if (text) {
+      /* The briefing is model-generated prose containing **bold** (see
+         synth.py's prompt). `textContent` showed the literal asterisks
+         (issue #11); `innerHTML` is not an option for text an LLM wrote --
+         so BriefingMD.parse() turns it into plain {bold, text} data and
+         every segment becomes a real DOM node here, never markup. A
+         "<script>" in the model's output is just a run of characters to
+         `el`/`createTextNode` and can never execute. */
+      var host = $("#briefing");
+      UI.clear(host);
+      BriefingMD.parseBriefingSegments(text).forEach(function (seg) {
+        host.appendChild(seg.bold ? el("strong", {}, [seg.text])
+                                   : document.createTextNode(seg.text));
+      });
+    }
 
     /* When there is no briefing, say why on the footer rather than leaving a
        silently missing section. */
