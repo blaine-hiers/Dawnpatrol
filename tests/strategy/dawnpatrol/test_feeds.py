@@ -294,6 +294,16 @@ class TestSizeCeilings(unittest.TestCase):
         self.assertTrue(res.ok, res.error)
         self.assertEqual(len(res.items), 1)
 
+    def test_zero_padding_between_members_still_parses_through_fetch_one(self):
+        first_half = RSS2[:len(RSS2) // 2]
+        second_half = RSS2[len(RSS2) // 2:]
+        mixed = gzip.compress(first_half) + b"\x00" * 8 + gzip.compress(second_half)
+        self._serve(mixed, {"Content-Encoding": "gzip"})
+        res = feeds.fetch_one({"name": "PaddedMiddle", "band": "press",
+                                "url": "http://example.test/feed"})
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(len(res.items), 1)
+
     def test_a_truncated_gzip_stream_is_reported_not_partially_parsed(self):
         """Cutting a gzip stream short of its final member must not hand
         `parse` a partial document that merely happens to fail to parse —
@@ -342,6 +352,32 @@ class TestInflateCapped(unittest.TestCase):
         self.assertEqual(gzip.decompress(padded), RSS2)   # the fixture is real
         got = feeds._inflate_capped(padded, zlib.MAX_WBITS | 16, 10**9)
         self.assertEqual(got, RSS2)
+
+    def test_zero_padding_between_two_members_still_decodes_both(self):
+        """Padding is not only tolerated at the very end --
+        `gzip.compress(A) + zero-padding + gzip.compress(B)` is a real (if
+        unusual) two-member stream, and the padding *between* members must
+        be discarded the same way padding *after* the last one is. This
+        used to raise `zlib.error` because only a wholly-zero leftover was
+        recognised as padding, so a real member following some zero bytes
+        was fed to a fresh decompressor with the leading zeros still stuck
+        to the front of it."""
+        first_half = RSS2[:len(RSS2) // 2]
+        second_half = RSS2[len(RSS2) // 2:]
+        mixed = gzip.compress(first_half) + b"\x00" * 8 + gzip.compress(second_half)
+        expected = gzip.decompress(mixed)
+        self.assertEqual(expected, RSS2)          # the fixture is real
+        got = feeds._inflate_capped(mixed, zlib.MAX_WBITS | 16, 10**9)
+        self.assertEqual(got, expected)
+
+    def test_the_size_cap_still_applies_to_a_member_that_follows_padding(self):
+        """Skipping the inert padding bytes must not also skip the cap
+        check on the real member that follows them."""
+        small = gzip.compress(b"a")
+        bomb = gzip.compress(b"a" * (2 * 1024 * 1024))
+        mixed = small + b"\x00" * 8 + bomb
+        with self.assertRaises(feeds._TooBig):
+            feeds._inflate_capped(mixed, zlib.MAX_WBITS | 16, 1024 * 1024)
 
     def test_trailing_non_zero_junk_still_raises(self):
         """Padding is forgiven; corruption is not. `\\x01` bytes can never be

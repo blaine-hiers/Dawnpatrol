@@ -385,16 +385,16 @@ def _inflate_capped(data: bytes, wbits: int, limit: int) -> bytes:
     Two edge cases decided deliberately, both to match `gzip.decompress`'s
     own behaviour rather than differing from it by accident:
 
-    * **Trailing zero-padding** after the last member (some encoders emit
-      this) is discarded rather than fed to a fresh decompressor as though
-      it were another member. `\\x00\\x00` can never be a real member's
-      magic bytes, so nothing that could ever be valid data is being
-      dropped — and without this, that padding raised `zlib.error`, which
-      `_decompress` reads as "not actually compressed" and returns the raw
-      *compressed* bytes, turning a perfectly good feed into a parse
-      failure. Non-zero trailing junk is not given the same pass: it is not
-      padding, it is corruption, and it still raises below, same as before
-      this function existed.
+    * **Zero-padding** between members, or after the last one, (some
+      encoders emit this) is discarded rather than fed to a fresh
+      decompressor as though it were another member. `\\x00\\x00` can never
+      be a real member's magic bytes, so nothing that could ever be valid
+      data is being dropped — and without this, that padding raised
+      `zlib.error`, which `_decompress` reads as "not actually compressed"
+      and returns the raw *compressed* bytes, turning a perfectly good feed
+      into a parse failure. Non-zero trailing junk is not given the same
+      pass: it is not padding, it is corruption, and it still raises below,
+      same as before this function existed.
     * **A truncated stream** (cut off before its member completes) raises
       `EOFError` instead of returning whatever partially inflated. The old
       one-shot `gzip.decompress` raised `EOFError` on exactly this input;
@@ -430,8 +430,18 @@ def _inflate_capped(data: bytes, wbits: int, limit: int) -> bytes:
             pos, pending = n, b""
             if not leftover:
                 break
-            if leftover.strip(b"\x00") == b"":
-                break                      # trailing zero-padding: discard it
+            # Zero-padding is discarded wherever it falls, not just at the
+            # very end: `gzip.compress(A) + b"\x00"*8 + gzip.compress(B)` is
+            # a real (if unusual) two-member stream, and the padding between
+            # A and B is exactly as harmless as padding after B is. Only
+            # *leading* NULs need stripping here --- a real member's magic
+            # bytes are never zero, so whatever follows the padding, if
+            # anything, starts the next member unchanged. The size cap below
+            # still applies to that member's output once decompression of it
+            # begins; only the inert padding bytes themselves are skipped.
+            leftover = leftover.lstrip(b"\x00")
+            if not leftover:
+                break                      # nothing left but padding
             d = zlib.decompressobj(wbits)
             pending = leftover
 
