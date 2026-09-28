@@ -185,8 +185,9 @@
   function renderKept() {
     var kept = (state && state.kept) || [];
     $("#keptSection").hidden = kept.length === 0;
-    $("#keptCount").textContent = kept.length +
-      " " + UI.pluralize(kept.length, "story", "stories");
+    // UI.pluralize already prefixes the count -- prepending it again is how
+    // "1 story" became "1 1 story" (issue #10).
+    $("#keptCount").textContent = UI.pluralize(kept.length, "story", "stories");
     var host = $("#kept");
     UI.clear(host);
     kept.forEach(function (k) {
@@ -271,8 +272,11 @@
          retained report --- a source added last week must read as "2 of 2
          observed", never "2 of 60 retained", or the denominator lies about
          history the source was never even part of. */
+      // Not UI.pluralize here (issue #10): it already prefixes the count, and
+      // "observed" has to sit between the count and the noun ("5 observed
+      // reports"), so the count would print twice.
       var samples = r.sampleSize + " observed " +
-        UI.pluralize(r.sampleSize, "report", "reports");
+        (r.sampleSize === 1 ? "report" : "reports");
 
       /* "never answered with an item" is only sayable when the whole retained
          history could actually be read. Reports stored before per-source `ok`
@@ -283,7 +287,7 @@
       var noItems = r.historyIncomplete
         ? "no answer on record in the " + samples + " that carry one · " +
           r.unclassifiedReports + " older " +
-          UI.pluralize(r.unclassifiedReports, "report", "reports") +
+          (r.unclassifiedReports === 1 ? "report" : "reports") +
           " cannot say"
         : "never answered with an item";
 
